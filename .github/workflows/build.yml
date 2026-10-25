@@ -48,23 +48,31 @@ jobs:
           cmake --build build --parallel 2
           cp build/StandAlone/glslang "${GITHUB_WORKSPACE}/xsdk-gcc/bin/glslang"
 
-      - name: Build sample
+      - name: Build Xbox SDK
         working-directory: xsdk
         env:
           PREFIX: ${{ github.workspace }}/xsdk-gcc
-          WORK: ${{ runner.temp }}/xsdk-gcc-work
           JOBS: "2"
         run: |
           make -j2 TOOLCHAIN="$PREFIX/bin/powerpc-xsdk-elf-"
-          make samples TOOLCHAIN="$PREFIX/bin/powerpc-xsdk-elf-"
+
+      - name: Configure GG Fall
+        env:
+          PREFIX: ${{ github.workspace }}/xsdk-gcc
+        run: |
+          cmake -S game -B game/build -G Ninja \
+            -DCMAKE_TOOLCHAIN_FILE="${GITHUB_WORKSPACE}/xsdk/cmake/xsdk.cmake" \
+            -DXSDK_TOOLCHAIN="$PREFIX" \
+            -DCMAKE_BUILD_TYPE=Release
+
+      - name: Compile GG Fall
+        run: cmake --build game/build --parallel 2
 
       - name: Package XEX
         run: |
           mkdir -p dist
-          find xsdk -name cube.xex -type f -print -quit > /tmp/xexpath
-          XEX="$(cat /tmp/xexpath)"
-          test -n "$XEX"
-          cp "$XEX" dist/GG-Fall.xex
+          test -f game/build/GG-Fall.xex
+          cp game/build/GG-Fall.xex dist/GG-Fall.xex
 
       - name: Upload XEX
         uses: actions/upload-artifact@v4
