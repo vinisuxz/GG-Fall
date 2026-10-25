@@ -48,37 +48,29 @@ jobs:
           git clone --depth 1 --branch xenon \
             https://github.com/xenosworks/glslang-xenon.git \
             glslang-xenon
-
           cd glslang-xenon
           python3 update_glslang_sources.py
-
           cmake -S . -B build -G Ninja \
             -DCMAKE_BUILD_TYPE=Release \
             -DENABLE_OPT=ON \
             -DSPIRV_SKIP_EXECUTABLES=ON \
             -DGLSLANG_TESTS=OFF
-
           cmake --build build --parallel 2
-
           mkdir -p "${GITHUB_WORKSPACE}/xsdk-gcc/bin"
           cp build/StandAlone/glslang \
             "${GITHUB_WORKSPACE}/xsdk-gcc/bin/glslang"
 
-           - name: Build Xbox SDK
+      - name: Build Xbox SDK
         working-directory: xsdk
         env:
           PREFIX: ${{ github.workspace }}/xsdk-gcc
         run: |
           make -j2 TOOLCHAIN="$PREFIX/bin/powerpc-xsdk-elf-"
-          find . -name 'libxsdk.a' -type f -print
 
       - name: Check game files
         run: |
-          echo "Checking game source files..."
           ls -la game
           test -f game/main.c
-          test -f game/cube.vert
-          test -f game/cube.frag
           test -f game/CMakeLists.txt
 
       - name: Configure GG Fall
@@ -91,23 +83,19 @@ jobs:
             -DCMAKE_BUILD_TYPE=Release
 
       - name: Compile GG Fall
-        run: |
-          cmake --build game/build --parallel 2
+        run: cmake --build game/build --parallel 2
 
       - name: Package XEX
         run: |
           mkdir -p dist
-          find game/build -maxdepth 2 \
-            -type f -name 'GG-Fall.xex' -print -quit \
-            > /tmp/xexpath
-
+          find game/build -type f -name 'GG-Fall.xex' \
+            -print -quit > /tmp/xexpath
           XEX="$(cat /tmp/xexpath)"
           if [ -z "$XEX" ]; then
             echo "GG-Fall.xex was not generated."
-            find game/build -maxdepth 3 -type f
+            find game/build -maxdepth 4 -type f
             exit 1
           fi
-
           cp "$XEX" dist/GG-Fall.xex
 
       - name: Upload XEX
