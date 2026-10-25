@@ -64,12 +64,13 @@ jobs:
           cp build/StandAlone/glslang \
             "${GITHUB_WORKSPACE}/xsdk-gcc/bin/glslang"
 
-      - name: Build Xbox SDK
+           - name: Build Xbox SDK
         working-directory: xsdk
         env:
           PREFIX: ${{ github.workspace }}/xsdk-gcc
         run: |
           make -j2 TOOLCHAIN="$PREFIX/bin/powerpc-xsdk-elf-"
+          find . -name 'libxsdk.a' -type f -print
 
       - name: Check game files
         run: |
