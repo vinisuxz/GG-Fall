@@ -48,13 +48,16 @@ jobs:
           cmake --build build --parallel 2
           cp build/StandAlone/glslang "${GITHUB_WORKSPACE}/xsdk-gcc/bin/glslang"
 
-      - name: Build Xbox SDK
-        working-directory: xsdk
-        env:
-          PREFIX: ${{ github.workspace }}/xsdk-gcc
-          JOBS: "2"
+      
+      - name: Configure GG Fall
         run: |
-          make -j2 TOOLCHAIN="$PREFIX/bin/powerpc-xsdk-elf-"
+          pwd
+          git rev-parse --short HEAD
+          find . -maxdepth 3 -iname 'CMakeLists.txt' -print
+          echo "Conteudo da pasta game:"
+          ls -la game
+          test -f game/CMakeLists.txt
+
 
       - name: Configure GG Fall
         env:
