@@ -37,7 +37,7 @@ jobs:
           PREFIX: ${{ github.workspace }}/xsdk-gcc
           WORK: ${{ runner.temp }}/xsdk-gcc-work
           JOBS: "2"
-        run: tools/toolchain/build.sh
+        run: bash tools/toolchain/build.sh
 
       - name: Build shader compiler
         run: |
