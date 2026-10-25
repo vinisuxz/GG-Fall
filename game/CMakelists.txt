@@ -1,0 +1,18 @@
+
+cmake_minimum_required(VERSION 3.25)
+project(GG-Fall C)
+
+add_executable(GG-Fall main.c)
+
+set_target_properties(GG-Fall PROPERTIES
+    C_STANDARD 17
+    C_EXTENSIONS ON
+)
+
+target_compile_options(GG-Fall PRIVATE
+    -Wall
+    -Wextra
+    -Werror
+)
+
+xsdk_add_xex(GG-Fall)
