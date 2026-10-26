@@ -26,19 +26,22 @@
 #define SPEED 0.035f
 #define JUMP_SPEED 0.095f
 #define GRAVITY 0.0042f
-#define CAMERA_FOLLOW 0.85f
+#define CAMERA_FOLLOW 1.0f
 
 #define DASH_SPEED 0.105f
 #define DASH_UP_SPEED 0.025f
 #define DASH_GRAVITY 0.0042f
 #define DASH_DURATION 30
-#define SLIDE_DURATION 12
-#define SLIDE_FRICTION 0.82f
+#define SLIDE_DURATION 240
+#define SLIDE_FRICTION 0.94f
+#define SLIDE_STOP_SPEED 0.002f
 
 #define CAMERA_TURN_SPEED 0.035f
 #define CAMERA_PITCH_SPEED 0.025f
 #define CAMERA_MIN_PITCH (-0.55f)
 #define CAMERA_MAX_PITCH (0.65f)
+#define CAMERA_DISTANCE 5.5f
+#define CAMERA_TARGET_HEIGHT 0.45f
 
 #define FLOOR_Y (-0.88f)
 #define PLAYER_HEIGHT 0.80f
@@ -75,8 +78,8 @@ typedef struct {
 } Checkpoint;
 
 static float camera_yaw = 0.0f;
-static float camera_pitch = 0.0f;
-static float camera_y = 0.45f;
+static float camera_pitch = 0.20f;
+static float camera_y = FLOOR_Y + CAMERA_TARGET_HEIGHT;
 
 static const Obstacle obstacles[] = {
     {-1.10f, -0.68f, -1.25f,
@@ -151,6 +154,12 @@ static Matrix multiply(const Matrix *a, const Matrix *b)
     return r;
 }
 
+/*
+ * Câmera orbital:
+ * 1. Move o mundo para que o jogador fique no centro.
+ * 2. Gira a visão na horizontal e na vertical.
+ * 3. Afasta a câmera do jogador pela distância configurada.
+ */
 static Matrix model_matrix(
     float x, float y, float z,
     float sx, float sy, float sz,
@@ -179,12 +188,12 @@ static Matrix model_matrix(
         x, y, z, 1
     }};
 
-    /* Câmera mais próxima do personagem. */
-    Matrix translation = {{
+    /* Centro que a câmera acompanha. */
+    Matrix target = {{
         1, 0, 0, 0,
         0, 1, 0, 0,
         0, 0, 1, 0,
-        -camera_x, -camera_y, -5.5f - camera_z, 1
+        -camera_x, -camera_y, -camera_z, 1
     }};
 
     float cy = cosf(-camera_yaw);
@@ -207,8 +216,17 @@ static Matrix model_matrix(
         0, 0, 0, 1
     }};
 
-    Matrix view = multiply(&rotate_y, &translation);
+    /* Distância da câmera em relação ao centro. */
+    Matrix distance = {{
+        1, 0, 0, 0,
+        0, 1, 0, 0,
+        0, 0, 1, 0,
+        0, 0, -CAMERA_DISTANCE, 1
+    }};
+
+    Matrix view = multiply(&rotate_y, &target);
     view = multiply(&rotate_x, &view);
+    view = multiply(&distance, &view);
 
     Matrix vm = multiply(&view, &m);
     return multiply(&p, &vm);
@@ -502,7 +520,6 @@ static void draw_player(
     bool dashing, bool sliding)
 {
     if (dashing || sliding) {
-        /* Corpo inclinado para a frente durante o dash. */
         draw_player_part(g, x, foot_y, z,
             0, 0.34f, 0,
             0.28f, 0.16f, 0.48f,
@@ -584,8 +601,7 @@ static void draw_checkpoint(
 
 int main(void)
 {
-    xsdk_log_write(
-        "GG Fall: dash, camera control, checkpoints");
+    xsdk_log_write("GG Fall: orbital camera and dash");
 
     NTSTATUS s = xsdk_splash_show(1500);
     (void)s;
@@ -648,13 +664,15 @@ int main(void)
         bool a_pressed = a_down && !previous_a;
         previous_a = a_down;
 
-        /* Câmera: analógico direito. */
+        /*
+         * Analógico direito:
+         * horizontal orbita a câmera ao redor do jogador;
+         * vertical controla o ângulo de visão.
+         */
         float look_x = axis(in.gamepad.thumb_rx);
         float look_y = axis(in.gamepad.thumb_ry);
 
         camera_yaw -= look_x * CAMERA_TURN_SPEED;
-
-        /* Inverte o controle vertical da câmera. */
         camera_pitch -= look_y * CAMERA_PITCH_SPEED;
 
         if (camera_pitch < CAMERA_MIN_PITCH)
@@ -663,7 +681,7 @@ int main(void)
         if (camera_pitch > CAMERA_MAX_PITCH)
             camera_pitch = CAMERA_MAX_PITCH;
 
-        /* Movimento relativo à direção da câmera. */
+        /* Movimento do personagem relativo à câmera. */
         float stick_x = axis(in.gamepad.thumb_lx);
         float stick_z = -axis(in.gamepad.thumb_ly);
 
@@ -704,6 +722,16 @@ int main(void)
                 slide_vx *= SLIDE_FRICTION;
                 slide_vz *= SLIDE_FRICTION;
                 slide_timer--;
+
+                float slide_speed = sqrtf(
+                    slide_vx * slide_vx +
+                    slide_vz * slide_vz);
+
+                if (slide_speed < SLIDE_STOP_SPEED) {
+                    slide_timer = 0;
+                    slide_vx = 0.0f;
+                    slide_vz = 0.0f;
+                }
             } else {
                 float candidate_x = x + move_x * SPEED;
 
@@ -724,7 +752,7 @@ int main(void)
         if (moving && dash_timer == 0 && slide_timer == 0)
             yaw = atan2f(move_x, move_z);
 
-        /* Pulo e dash aéreo. */
+        /* Pulo e dash no ar. */
         if (a_pressed && grounded && !finished) {
             vy = JUMP_SPEED;
             grounded = false;
@@ -784,6 +812,7 @@ int main(void)
             landed = true;
         }
 
+        /* Ao tocar o chão durante o dash, começa a deslizar. */
         if (landed && dash_timer > 0) {
             slide_timer = SLIDE_DURATION;
             slide_vx = dash_vx;
@@ -791,13 +820,10 @@ int main(void)
             dash_timer = 0;
         }
 
-        if (!landed && foot_y > FALL_LIMIT)
-            grounded = false;
-
         if (grounded && slide_timer == 0)
             has_dashed = false;
 
-        /* Checkpoints em ordem. */
+        /* Ativação sequencial dos checkpoints. */
         if (next_checkpoint < CHECKPOINT_COUNT) {
             const Checkpoint *cp =
                 &checkpoints[next_checkpoint];
@@ -816,7 +842,7 @@ int main(void)
             }
         }
 
-        /* Respawn ao cair. */
+        /* Respawn ao cair da plataforma. */
         if (foot_y < FALL_LIMIT) {
             x = checkpoint_x;
             z = checkpoint_z;
@@ -837,9 +863,11 @@ int main(void)
             xsdk_log_write("GG Fall: level completed!");
         }
 
-        /* Câmera mais alta e acompanhando o pulo. */
-        camera_y =
-            0.45f + (foot_y - FLOOR_Y) * 0.60f;
+        /*
+         * O centro da câmera acompanha o jogador.
+         * A órbita é calculada em model_matrix().
+         */
+        camera_y = foot_y + CAMERA_TARGET_HEIGHT;
 
         uint32_t address;
 
@@ -851,7 +879,6 @@ int main(void)
 
         float aspect = (float)w / (float)h;
 
-        /* Câmera acompanha mais o jogador. */
         float camera_x = x * CAMERA_FOLLOW;
         float camera_z = z * CAMERA_FOLLOW;
 
