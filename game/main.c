@@ -29,6 +29,18 @@
 #define GRAVITY 0.004f
 #define CAMERA_FOLLOW 0.60f
 
+#define DASH_SPEED 0.105f
+#define DASH_UP_SPEED 0.035f
+#define DASH_GRAVITY 0.0035f
+#define DASH_DURATION 16
+#define SLIDE_DURATION 12
+#define SLIDE_FRICTION 0.82f
+
+#define CAMERA_TURN_SPEED 0.035f
+#define CAMERA_PITCH_SPEED 0.025f
+#define CAMERA_MIN_PITCH (-0.55f)
+#define CAMERA_MAX_PITCH (0.65f)
+
 #define FLOOR_Y (-0.88f)
 #define PLAYER_HEIGHT 0.80f
 #define PLAYER_RADIUS 0.18f
@@ -64,7 +76,10 @@ typedef struct {
     float x, z;
 } Checkpoint;
 
-/* Percurso: os blocos podem ser atravessados por cima. */
+static float camera_yaw = 0.0f;
+static float camera_pitch = 0.0f;
+static float camera_y = 0.0f;
+
 static const Obstacle obstacles[] = {
     {-1.10f, -0.68f, -1.25f,
      0.55f, 0.40f, 0.55f, 0.0f},
@@ -126,10 +141,9 @@ static Matrix multiply(const Matrix *a, const Matrix *b)
         for (int row = 0; row < 4; row++) {
             float sum = 0.0f;
 
-            for (int k = 0; k < 4; k++) {
+            for (int k = 0; k < 4; k++)
                 sum += a->m[k * 4 + row] *
                        b->m[c * 4 + k];
-            }
 
             r.m[c * 4 + row] = sum;
         }
@@ -166,12 +180,35 @@ static Matrix model_matrix(
         x, y, z, 1
     }};
 
-    Matrix view = {{
+    Matrix translation = {{
         1, 0, 0, 0,
         0, 1, 0, 0,
         0, 0, 1, 0,
-        -camera_x, 0, -8.0f - camera_z, 1
+        -camera_x, -camera_y, -8.0f - camera_z, 1
     }};
+
+    float cy = cosf(-camera_yaw);
+    float syaw = sinf(-camera_yaw);
+
+    Matrix rotate_y = {{
+        cy, 0, -syaw, 0,
+        0, 1, 0, 0,
+        syaw, 0, cy, 0,
+        0, 0, 0, 1
+    }};
+
+    float cp = cosf(-camera_pitch);
+    float sp = sinf(-camera_pitch);
+
+    Matrix rotate_x = {{
+        1, 0, 0, 0,
+        0, cp, -sp, 0,
+        0, sp, cp, 0,
+        0, 0, 0, 1
+    }};
+
+    Matrix view = multiply(&rotate_y, &translation);
+    view = multiply(&rotate_x, &view);
 
     Matrix vm = multiply(&view, &m);
     return multiply(&p, &vm);
@@ -361,8 +398,6 @@ static bool on_platform(float x, float z)
            z <= PLATFORM_MAX_Z;
 }
 
-/* Colisão lateral: não bloqueia quando o personagem
-   está acima do topo do obstáculo. */
 static bool collides_obstacles(
     float x, float foot_y, float z)
 {
@@ -397,7 +432,6 @@ static bool collides_obstacles(
     return false;
 }
 
-/* Verifica se o personagem está sobre a área de um bloco. */
 static bool overlaps_obstacle_top(
     const Obstacle *o, float x, float z)
 {
@@ -415,8 +449,6 @@ static bool overlaps_obstacle_top(
            z >= min_z && z <= max_z;
 }
 
-/* Pouso no topo: só funciona quando está descendo
-   e cruza a altura superior do bloco. */
 static bool land_on_obstacle(
     float x, float z,
     float previous_y, float *foot_y, float *vy)
@@ -464,19 +496,50 @@ static void draw_player_part(
     draw_object(g, &m);
 }
 
-/* Animação simples das pernas e dos braços. */
 static void draw_player(
     Game *g,
     float x, float foot_y, float z, float yaw,
     float aspect, float camera_x, float camera_z,
-    float walk_phase, bool moving, bool airborne)
+    float walk_phase, bool moving,
+    bool dashing, bool sliding)
 {
-    float swing = moving ? sinf(walk_phase) * 0.07f : 0.0f;
+    if (dashing || sliding) {
+        draw_player_part(g, x, foot_y, z,
+            0, 0.34f, 0,
+            0.28f, 0.16f, 0.48f,
+            yaw, aspect, camera_x, camera_z);
 
-    if (airborne)
-        swing = 0.04f;
+        draw_player_part(g, x, foot_y, z,
+            0, 0.43f, 0.28f,
+            0.23f, 0.20f, 0.22f,
+            yaw, aspect, camera_x, camera_z);
 
-    /* Pernas: deslocamento alternado. */
+        draw_player_part(g, x, foot_y, z,
+            -0.22f, 0.35f, 0.25f,
+            0.09f, 0.10f, 0.36f,
+            yaw, aspect, camera_x, camera_z);
+
+        draw_player_part(g, x, foot_y, z,
+             0.22f, 0.35f, 0.25f,
+            0.09f, 0.10f, 0.36f,
+            yaw, aspect, camera_x, camera_z);
+
+        draw_player_part(g, x, foot_y, z,
+            -0.09f, 0.27f, -0.30f,
+            0.11f, 0.12f, 0.25f,
+            yaw, aspect, camera_x, camera_z);
+
+        draw_player_part(g, x, foot_y, z,
+             0.09f, 0.27f, -0.30f,
+            0.11f, 0.12f, 0.25f,
+            yaw, aspect, camera_x, camera_z);
+
+        return;
+    }
+
+    float swing =
+        moving ? sinf(walk_phase) * 0.07f : 0.0f;
+
     draw_player_part(g, x, foot_y, z,
         -0.105f, 0.12f, swing,
         0.12f, 0.24f, 0.14f,
@@ -487,13 +550,11 @@ static void draw_player(
         0.12f, 0.24f, 0.14f,
         yaw, aspect, camera_x, camera_z);
 
-    /* Tronco */
     draw_player_part(g, x, foot_y, z,
         0, 0.39f, 0,
         0.31f, 0.34f, 0.19f,
         yaw, aspect, camera_x, camera_z);
 
-    /* Braços alternam com as pernas. */
     draw_player_part(g, x, foot_y, z,
         -0.225f, 0.39f, -swing,
         0.10f, 0.30f, 0.12f,
@@ -504,7 +565,6 @@ static void draw_player(
         0.10f, 0.30f, 0.12f,
         yaw, aspect, camera_x, camera_z);
 
-    /* Cabeça */
     draw_player_part(g, x, foot_y, z,
         0, 0.69f, 0,
         0.25f, 0.25f, 0.25f,
@@ -526,7 +586,7 @@ static void draw_checkpoint(
 int main(void)
 {
     xsdk_log_write(
-        "GG Fall: collisions, jumping, checkpoints, finish");
+        "GG Fall: dash, camera control, checkpoints");
 
     NTSTATUS s = xsdk_splash_show(1500);
     (void)s;
@@ -558,8 +618,18 @@ int main(void)
     float yaw = 0.0f;
     float walk_phase = 0.0f;
 
+    float dash_vx = 0.0f;
+    float dash_vz = 0.0f;
+    float slide_vx = 0.0f;
+    float slide_vz = 0.0f;
+
+    int dash_timer = 0;
+    int slide_timer = 0;
+
     bool grounded = true;
+    bool has_dashed = false;
     bool finished = false;
+    bool previous_a = false;
 
     float checkpoint_x = 0.0f;
     float checkpoint_z = 0.0f;
@@ -573,52 +643,129 @@ int main(void)
             break;
         }
 
-        float move_x = axis(in.gamepad.thumb_lx);
-        float move_z = -axis(in.gamepad.thumb_ly);
+        bool a_down =
+            (in.gamepad.buttons & INPUT_GAMEPAD_A) != 0;
+
+        bool a_pressed = a_down && !previous_a;
+        previous_a = a_down;
+
+        /* Câmera: analógico direito. */
+        float look_x = axis(in.gamepad.thumb_rx);
+        float look_y = axis(in.gamepad.thumb_ry);
+
+        camera_yaw -= look_x * CAMERA_TURN_SPEED;
+        camera_pitch += look_y * CAMERA_PITCH_SPEED;
+
+        if (camera_pitch < CAMERA_MIN_PITCH)
+            camera_pitch = CAMERA_MIN_PITCH;
+
+        if (camera_pitch > CAMERA_MAX_PITCH)
+            camera_pitch = CAMERA_MAX_PITCH;
+
+        /* Movimento relativo à câmera. */
+        float stick_x = axis(in.gamepad.thumb_lx);
+        float stick_z = -axis(in.gamepad.thumb_ly);
+
+        float cy = cosf(camera_yaw);
+        float sy = sinf(camera_yaw);
+
+        float move_x = stick_x * cy + stick_z * sy;
+        float move_z = -stick_x * sy + stick_z * cy;
 
         bool moving =
-            move_x != 0.0f || move_z != 0.0f;
+            stick_x != 0.0f || stick_z != 0.0f;
 
         if (moving)
             walk_phase += 0.22f;
 
-        /* Movimento horizontal separado para deslizar
-           ao longo das laterais dos blocos. */
-        float candidate_x = x + move_x * SPEED;
+        if (!finished) {
+            if (dash_timer > 0) {
+                float nx = x + dash_vx;
+                float nz = z + dash_vz;
 
-        if (!collides_obstacles(candidate_x, foot_y, z))
-            x = candidate_x;
+                if (!collides_obstacles(nx, foot_y, z))
+                    x = nx;
 
-        float candidate_z = z + move_z * SPEED;
+                if (!collides_obstacles(x, foot_y, nz))
+                    z = nz;
 
-        if (!collides_obstacles(x, foot_y, candidate_z))
-            z = candidate_z;
+                dash_timer--;
 
-        if (moving)
+            } else if (slide_timer > 0) {
+                float nx = x + slide_vx;
+                float nz = z + slide_vz;
+
+                if (!collides_obstacles(nx, foot_y, z))
+                    x = nx;
+
+                if (!collides_obstacles(x, foot_y, nz))
+                    z = nz;
+
+                slide_vx *= SLIDE_FRICTION;
+                slide_vz *= SLIDE_FRICTION;
+                slide_timer--;
+
+            } else {
+                float candidate_x = x + move_x * SPEED;
+
+                if (!collides_obstacles(
+                        candidate_x, foot_y, z))
+                    x = candidate_x;
+
+                float candidate_z = z + move_z * SPEED;
+
+                if (!collides_obstacles(
+                        x, foot_y, candidate_z))
+                    z = candidate_z;
+            }
+        }
+
+        if (moving && dash_timer == 0 && slide_timer == 0)
             yaw = atan2f(move_x, move_z);
 
-        /* Ao sair da plataforma, começa a cair. */
-        if (grounded && !on_platform(x, z))
-            grounded = false;
-
-        /* A permite pular tanto da plataforma quanto
-           do topo de um obstáculo. */
-        if ((in.gamepad.buttons & INPUT_GAMEPAD_A) &&
-            grounded) {
+        /* Pulo e dash aéreo. */
+        if (a_pressed && grounded && !finished) {
             vy = JUMP_SPEED;
             grounded = false;
+            has_dashed = false;
+        } else if (a_pressed && !grounded &&
+                   !has_dashed && !finished) {
+            has_dashed = true;
+            dash_timer = DASH_DURATION;
+
+            float forward_x = sinf(yaw);
+            float forward_z = cosf(yaw);
+
+            if (moving) {
+                float len = sqrtf(
+                    move_x * move_x + move_z * move_z);
+
+                if (len > 0.001f) {
+                    forward_x = move_x / len;
+                    forward_z = move_z / len;
+                }
+            } else {
+                forward_x = sinf(camera_yaw);
+                forward_z = -cosf(camera_yaw);
+            }
+
+            dash_vx = forward_x * DASH_SPEED;
+            dash_vz = forward_z * DASH_SPEED;
+            vy = DASH_UP_SPEED;
         }
 
         float previous_y = foot_y;
-
         foot_y += vy;
 
-        if (!grounded)
-            vy -= GRAVITY;
+        if (!grounded) {
+            if (dash_timer > 0)
+                vy -= DASH_GRAVITY;
+            else
+                vy -= GRAVITY;
+        }
 
         bool landed = false;
 
-        /* Aterrissagem na plataforma principal. */
         if (vy <= 0.0f &&
             on_platform(x, z) &&
             previous_y >= FLOOR_Y &&
@@ -629,7 +776,6 @@ int main(void)
             landed = true;
         }
 
-        /* Aterrissagem em cima dos blocos. */
         if (!landed &&
             land_on_obstacle(
                 x, z, previous_y, &foot_y, &vy)) {
@@ -637,11 +783,20 @@ int main(void)
             landed = true;
         }
 
-        /* Se não pousou, continua no ar. */
+        if (landed && dash_timer > 0) {
+            slide_timer = SLIDE_DURATION;
+            slide_vx = dash_vx;
+            slide_vz = dash_vz;
+            dash_timer = 0;
+        }
+
         if (!landed && foot_y > FALL_LIMIT)
             grounded = false;
 
-        /* Checkpoints ativados em ordem. */
+        if (grounded && slide_timer == 0)
+            has_dashed = false;
+
+        /* Checkpoints. */
         if (next_checkpoint < CHECKPOINT_COUNT) {
             const Checkpoint *cp =
                 &checkpoints[next_checkpoint];
@@ -660,21 +815,28 @@ int main(void)
             }
         }
 
-        /* Cair abaixo do limite faz reaparecer no
-           último checkpoint ativado. */
+        /* Respawn ao cair. */
         if (foot_y < FALL_LIMIT) {
             x = checkpoint_x;
             z = checkpoint_z;
             foot_y = FLOOR_Y;
             vy = 0.0f;
             grounded = true;
+
+            dash_timer = 0;
+            slide_timer = 0;
+            has_dashed = false;
+            dash_vx = dash_vz = 0.0f;
+            slide_vx = slide_vz = 0.0f;
         }
 
-        /* Chegada ao fim do percurso. */
         if (!finished && z <= FINISH_Z) {
             finished = true;
             xsdk_log_write("GG Fall: level completed!");
         }
+
+        /* Câmera acompanha a altura do salto. */
+        camera_y = (foot_y - FLOOR_Y) * CAMERA_FOLLOW;
 
         uint32_t address;
 
@@ -704,7 +866,6 @@ int main(void)
             xsdk_gpu_address(g.vertices),
             VERTICES_BYTES);
 
-        /* Plataforma comprida para a nova fase. */
         Matrix platform = model_matrix(
             0.0f, -0.94f, -3.5f,
             5.0f, 0.12f, 11.0f,
@@ -712,30 +873,23 @@ int main(void)
 
         draw_object(&g, &platform);
 
-        /* Checkpoints */
         for (unsigned i = 0; i < CHECKPOINT_COUNT; i++) {
             draw_checkpoint(
-                &g,
-                checkpoints[i].x,
-                checkpoints[i].z,
-                aspect,
-                camera_x, camera_z);
+                &g, checkpoints[i].x, checkpoints[i].z,
+                aspect, camera_x, camera_z);
         }
 
-        /* Obstáculos */
         for (unsigned i = 0; i < OBSTACLE_COUNT; i++) {
             const Obstacle *o = &obstacles[i];
 
             Matrix m = model_matrix(
                 o->x, o->y, o->z,
                 o->sx, o->sy, o->sz,
-                o->yaw, aspect,
-                camera_x, camera_z);
+                o->yaw, aspect, camera_x, camera_z);
 
             draw_object(&g, &m);
         }
 
-        /* Linha de chegada. */
         Matrix finish_line = model_matrix(
             0.0f, FLOOR_Y + 0.025f, FINISH_Z,
             4.5f, 0.05f, 0.18f,
@@ -743,11 +897,11 @@ int main(void)
 
         draw_object(&g, &finish_line);
 
-        /* Personagem */
         draw_player(
             &g, x, foot_y, z, yaw,
             aspect, camera_x, camera_z,
-            walk_phase, moving, !grounded);
+            walk_phase, moving,
+            dash_timer > 0, slide_timer > 0);
 
         xsdk_gpu_resolve(
             address, w, h, CLEAR_ARGB);
