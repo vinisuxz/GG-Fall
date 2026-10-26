@@ -35,11 +35,12 @@
 
 #define PLATFORM_MIN_X (-2.5f)
 #define PLATFORM_MAX_X (2.5f)
-#define PLATFORM_MIN_Z (-4.0f)
+#define PLATFORM_MIN_Z (-9.0f)
 #define PLATFORM_MAX_Z (2.0f)
 
 #define FALL_LIMIT (-3.0f)
 #define CHECKPOINT_RADIUS 0.55f
+#define FINISH_Z (-8.20f)
 
 typedef struct {
     float m[16];
@@ -63,6 +64,42 @@ typedef struct {
     float x, z;
 } Checkpoint;
 
+/* Percurso: os blocos podem ser atravessados por cima. */
+static const Obstacle obstacles[] = {
+    {-1.10f, -0.68f, -1.25f,
+     0.55f, 0.40f, 0.55f, 0.0f},
+
+    { 0.85f, -0.72f, -2.35f,
+     0.75f, 0.32f, 0.50f, 0.35f},
+
+    {-0.65f, -0.70f,  1.15f,
+     0.45f, 0.36f, 0.45f, 0.6f},
+
+    { 1.35f, -0.65f, -4.35f,
+     0.65f, 0.46f, 0.65f, 0.0f},
+
+    {-0.85f, -0.70f, -5.45f,
+     0.70f, 0.36f, 0.55f, 0.2f},
+
+    { 0.45f, -0.62f, -6.65f,
+     0.60f, 0.52f, 0.60f, 0.0f},
+
+    {-1.45f, -0.72f, -7.45f,
+     0.50f, 0.32f, 0.50f, 0.0f}
+};
+
+#define OBSTACLE_COUNT \
+    (sizeof(obstacles) / sizeof(obstacles[0]))
+
+static const Checkpoint checkpoints[] = {
+    { 1.55f, -0.25f},
+    {-1.55f, -3.30f},
+    { 0.00f, -5.95f}
+};
+
+#define CHECKPOINT_COUNT \
+    (sizeof(checkpoints) / sizeof(checkpoints[0]))
+
 static const XsdkVertexElement layout[] = {
     {
         .usage = XSDK_USAGE_POSITION,
@@ -81,30 +118,6 @@ static const XsdkVertexElement layout[] = {
     }
 };
 
-/* Obstáculos: posição, tamanho e rotação. */
-static const Obstacle obstacles[] = {
-    {-1.1f, -0.68f, -1.25f,
-     0.55f, 0.40f, 0.55f, 0.0f},
-
-    {0.85f, -0.72f, -2.35f,
-     0.75f, 0.32f, 0.50f, 0.35f},
-
-    {-0.65f, -0.70f, 1.15f,
-     0.45f, 0.36f, 0.45f, 0.6f}
-};
-
-#define OBSTACLE_COUNT \
-    (sizeof(obstacles) / sizeof(obstacles[0]))
-
-/* Dois checkpoints espalhados pelo percurso. */
-static const Checkpoint checkpoints[] = {
-    {1.55f, -0.25f},
-    {-1.55f, -3.30f}
-};
-
-#define CHECKPOINT_COUNT \
-    (sizeof(checkpoints) / sizeof(checkpoints[0]))
-
 static Matrix multiply(const Matrix *a, const Matrix *b)
 {
     Matrix r;
@@ -113,9 +126,10 @@ static Matrix multiply(const Matrix *a, const Matrix *b)
         for (int row = 0; row < 4; row++) {
             float sum = 0.0f;
 
-            for (int k = 0; k < 4; k++)
+            for (int k = 0; k < 4; k++) {
                 sum += a->m[k * 4 + row] *
                        b->m[c * 4 + k];
+            }
 
             r.m[c * 4 + row] = sum;
         }
@@ -339,37 +353,6 @@ static void draw_object(Game *g, const Matrix *m)
         false);
 }
 
-/* Verifica colisão horizontal e vertical com os obstáculos. */
-static bool collides_obstacles(
-    float x, float foot_y, float z)
-{
-    for (unsigned i = 0; i < OBSTACLE_COUNT; i++) {
-        const Obstacle *o = &obstacles[i];
-
-        float min_x = o->x - o->sx * 0.5f - PLAYER_RADIUS;
-        float max_x = o->x + o->sx * 0.5f + PLAYER_RADIUS;
-
-        float min_z = o->z - o->sz * 0.5f - PLAYER_RADIUS;
-        float max_z = o->z + o->sz * 0.5f + PLAYER_RADIUS;
-
-        float obstacle_bottom = o->y - o->sy * 0.5f;
-        float obstacle_top = o->y + o->sy * 0.5f;
-
-        bool horizontal =
-            x > min_x && x < max_x &&
-            z > min_z && z < max_z;
-
-        bool vertical =
-            foot_y < obstacle_top &&
-            foot_y + PLAYER_HEIGHT > obstacle_bottom;
-
-        if (horizontal && vertical)
-            return true;
-    }
-
-    return false;
-}
-
 static bool on_platform(float x, float z)
 {
     return x >= PLATFORM_MIN_X &&
@@ -378,7 +361,87 @@ static bool on_platform(float x, float z)
            z <= PLATFORM_MAX_Z;
 }
 
-/* Desenha cada peça do boneco girando em torno do centro. */
+/* Colisão lateral: não bloqueia quando o personagem
+   está acima do topo do obstáculo. */
+static bool collides_obstacles(
+    float x, float foot_y, float z)
+{
+    for (unsigned i = 0; i < OBSTACLE_COUNT; i++) {
+        const Obstacle *o = &obstacles[i];
+
+        float min_x =
+            o->x - o->sx * 0.5f - PLAYER_RADIUS;
+        float max_x =
+            o->x + o->sx * 0.5f + PLAYER_RADIUS;
+
+        float min_z =
+            o->z - o->sz * 0.5f - PLAYER_RADIUS;
+        float max_z =
+            o->z + o->sz * 0.5f + PLAYER_RADIUS;
+
+        float bottom = o->y - o->sy * 0.5f;
+        float top = o->y + o->sy * 0.5f;
+
+        bool horizontal =
+            x > min_x && x < max_x &&
+            z > min_z && z < max_z;
+
+        bool vertical =
+            foot_y < top - 0.001f &&
+            foot_y + PLAYER_HEIGHT > bottom;
+
+        if (horizontal && vertical)
+            return true;
+    }
+
+    return false;
+}
+
+/* Verifica se o personagem está sobre a área de um bloco. */
+static bool overlaps_obstacle_top(
+    const Obstacle *o, float x, float z)
+{
+    float min_x =
+        o->x - o->sx * 0.5f - PLAYER_RADIUS;
+    float max_x =
+        o->x + o->sx * 0.5f + PLAYER_RADIUS;
+
+    float min_z =
+        o->z - o->sz * 0.5f - PLAYER_RADIUS;
+    float max_z =
+        o->z + o->sz * 0.5f + PLAYER_RADIUS;
+
+    return x >= min_x && x <= max_x &&
+           z >= min_z && z <= max_z;
+}
+
+/* Pouso no topo: só funciona quando está descendo
+   e cruza a altura superior do bloco. */
+static bool land_on_obstacle(
+    float x, float z,
+    float previous_y, float *foot_y, float *vy)
+{
+    if (*vy > 0.0f)
+        return false;
+
+    for (unsigned i = 0; i < OBSTACLE_COUNT; i++) {
+        const Obstacle *o = &obstacles[i];
+        float top = o->y + o->sy * 0.5f;
+
+        if (!overlaps_obstacle_top(o, x, z))
+            continue;
+
+        if (previous_y >= top &&
+            *foot_y <= top) {
+            *foot_y = top;
+            *vy = 0.0f;
+            return true;
+        }
+    }
+
+    return false;
+}
+
 static void draw_player_part(
     Game *g,
     float px, float foot_y, float pz,
@@ -401,19 +464,26 @@ static void draw_player_part(
     draw_object(g, &m);
 }
 
+/* Animação simples das pernas e dos braços. */
 static void draw_player(
     Game *g,
     float x, float foot_y, float z, float yaw,
-    float aspect, float camera_x, float camera_z)
+    float aspect, float camera_x, float camera_z,
+    float walk_phase, bool moving, bool airborne)
 {
-    /* Pernas */
+    float swing = moving ? sinf(walk_phase) * 0.07f : 0.0f;
+
+    if (airborne)
+        swing = 0.04f;
+
+    /* Pernas: deslocamento alternado. */
     draw_player_part(g, x, foot_y, z,
-        -0.105f, 0.12f, 0,
+        -0.105f, 0.12f, swing,
         0.12f, 0.24f, 0.14f,
         yaw, aspect, camera_x, camera_z);
 
     draw_player_part(g, x, foot_y, z,
-         0.105f, 0.12f, 0,
+         0.105f, 0.12f, -swing,
         0.12f, 0.24f, 0.14f,
         yaw, aspect, camera_x, camera_z);
 
@@ -423,14 +493,14 @@ static void draw_player(
         0.31f, 0.34f, 0.19f,
         yaw, aspect, camera_x, camera_z);
 
-    /* Braços */
+    /* Braços alternam com as pernas. */
     draw_player_part(g, x, foot_y, z,
-        -0.225f, 0.39f, 0,
+        -0.225f, 0.39f, -swing,
         0.10f, 0.30f, 0.12f,
         yaw, aspect, camera_x, camera_z);
 
     draw_player_part(g, x, foot_y, z,
-         0.225f, 0.39f, 0,
+         0.225f, 0.39f, swing,
         0.10f, 0.30f, 0.12f,
         yaw, aspect, camera_x, camera_z);
 
@@ -456,7 +526,7 @@ static void draw_checkpoint(
 int main(void)
 {
     xsdk_log_write(
-        "GG Fall: move, jump, checkpoints, Back exits");
+        "GG Fall: collisions, jumping, checkpoints, finish");
 
     NTSTATUS s = xsdk_splash_show(1500);
     (void)s;
@@ -486,10 +556,11 @@ int main(void)
     float z = 0.0f;
     float vy = 0.0f;
     float yaw = 0.0f;
+    float walk_phase = 0.0f;
 
     bool grounded = true;
+    bool finished = false;
 
-    /* Checkpoint inicial, usado até ativar outro. */
     float checkpoint_x = 0.0f;
     float checkpoint_z = 0.0f;
     unsigned next_checkpoint = 0;
@@ -503,12 +574,16 @@ int main(void)
         }
 
         float move_x = axis(in.gamepad.thumb_lx);
-
-        /* Inverte o eixo frente/trás. */
         float move_z = -axis(in.gamepad.thumb_ly);
 
-        /* Calcula cada eixo separadamente para permitir
-           deslizar ao longo de uma parede. */
+        bool moving =
+            move_x != 0.0f || move_z != 0.0f;
+
+        if (moving)
+            walk_phase += 0.22f;
+
+        /* Movimento horizontal separado para deslizar
+           ao longo das laterais dos blocos. */
         float candidate_x = x + move_x * SPEED;
 
         if (!collides_obstacles(candidate_x, foot_y, z))
@@ -519,34 +594,54 @@ int main(void)
         if (!collides_obstacles(x, foot_y, candidate_z))
             z = candidate_z;
 
-        /* O personagem vira para a direção do movimento. */
-        if (move_x != 0.0f || move_z != 0.0f)
+        if (moving)
             yaw = atan2f(move_x, move_z);
 
         /* Ao sair da plataforma, começa a cair. */
         if (grounded && !on_platform(x, z))
             grounded = false;
 
-        /* Pulo. */
+        /* A permite pular tanto da plataforma quanto
+           do topo de um obstáculo. */
         if ((in.gamepad.buttons & INPUT_GAMEPAD_A) &&
             grounded) {
             vy = JUMP_SPEED;
             grounded = false;
         }
 
+        float previous_y = foot_y;
+
         foot_y += vy;
 
         if (!grounded)
             vy -= GRAVITY;
 
-        /* Só aterrissa na plataforma quando está dentro dela. */
-        if (on_platform(x, z) && foot_y <= FLOOR_Y) {
+        bool landed = false;
+
+        /* Aterrissagem na plataforma principal. */
+        if (vy <= 0.0f &&
+            on_platform(x, z) &&
+            previous_y >= FLOOR_Y &&
+            foot_y <= FLOOR_Y) {
             foot_y = FLOOR_Y;
             vy = 0.0f;
             grounded = true;
+            landed = true;
         }
 
-        /* Ativa os checkpoints em ordem. */
+        /* Aterrissagem em cima dos blocos. */
+        if (!landed &&
+            land_on_obstacle(
+                x, z, previous_y, &foot_y, &vy)) {
+            grounded = true;
+            landed = true;
+        }
+
+        /* Se não pousou, continua no ar. */
+        if (!landed && foot_y > FALL_LIMIT)
+            grounded = false;
+
+        /* Checkpoints ativados em ordem. */
         if (next_checkpoint < CHECKPOINT_COUNT) {
             const Checkpoint *cp =
                 &checkpoints[next_checkpoint];
@@ -560,17 +655,25 @@ int main(void)
                 checkpoint_z = cp->z;
                 next_checkpoint++;
 
-                xsdk_log_write("GG Fall: checkpoint activated");
+                xsdk_log_write(
+                    "GG Fall: checkpoint activated");
             }
         }
 
-        /* Se cair, reaparece no último checkpoint. */
+        /* Cair abaixo do limite faz reaparecer no
+           último checkpoint ativado. */
         if (foot_y < FALL_LIMIT) {
             x = checkpoint_x;
             z = checkpoint_z;
             foot_y = FLOOR_Y;
             vy = 0.0f;
             grounded = true;
+        }
+
+        /* Chegada ao fim do percurso. */
+        if (!finished && z <= FINISH_Z) {
+            finished = true;
+            xsdk_log_write("GG Fall: level completed!");
         }
 
         uint32_t address;
@@ -582,7 +685,6 @@ int main(void)
             break;
 
         float aspect = (float)w / (float)h;
-
         float camera_x = x * CAMERA_FOLLOW;
         float camera_z = z * CAMERA_FOLLOW;
 
@@ -602,41 +704,50 @@ int main(void)
             xsdk_gpu_address(g.vertices),
             VERTICES_BYTES);
 
-        /* Plataforma ampliada ao longo do percurso. */
+        /* Plataforma comprida para a nova fase. */
         Matrix platform = model_matrix(
-            0.0f, -0.94f, -1.0f,
-            5.0f, 0.12f, 6.0f,
+            0.0f, -0.94f, -3.5f,
+            5.0f, 0.12f, 11.0f,
             0.0f, aspect, camera_x, camera_z);
 
         draw_object(&g, &platform);
 
-        /* Marcadores dos checkpoints. */
+        /* Checkpoints */
         for (unsigned i = 0; i < CHECKPOINT_COUNT; i++) {
             draw_checkpoint(
                 &g,
                 checkpoints[i].x,
                 checkpoints[i].z,
                 aspect,
-                camera_x,
-                camera_z);
+                camera_x, camera_z);
         }
 
-        /* Obstáculos. */
+        /* Obstáculos */
         for (unsigned i = 0; i < OBSTACLE_COUNT; i++) {
             const Obstacle *o = &obstacles[i];
 
             Matrix m = model_matrix(
                 o->x, o->y, o->z,
                 o->sx, o->sy, o->sz,
-                o->yaw, aspect, camera_x, camera_z);
+                o->yaw, aspect,
+                camera_x, camera_z);
 
             draw_object(&g, &m);
         }
 
-        /* Boneco 3D. */
+        /* Linha de chegada. */
+        Matrix finish_line = model_matrix(
+            0.0f, FLOOR_Y + 0.025f, FINISH_Z,
+            4.5f, 0.05f, 0.18f,
+            0.0f, aspect, camera_x, camera_z);
+
+        draw_object(&g, &finish_line);
+
+        /* Personagem */
         draw_player(
             &g, x, foot_y, z, yaw,
-            aspect, camera_x, camera_z);
+            aspect, camera_x, camera_z,
+            walk_phase, moving, !grounded);
 
         xsdk_gpu_resolve(
             address, w, h, CLEAR_ARGB);
