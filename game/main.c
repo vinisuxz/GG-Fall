@@ -17,7 +17,6 @@
 #define SWAP_INTERVAL 1
 #define BEGIN_TIMEOUT_MS 5000
 #define CLEAR_ARGB 0xFF87CEEB
-
 #define VERTEX_FLOATS 8
 #define STRIDE_BYTES (VERTEX_FLOATS * 4)
 #define VERTICES_BYTES (24 * STRIDE_BYTES)
@@ -25,14 +24,14 @@
 
 #define STICK_DEAD_ZONE 8000
 #define SPEED 0.035f
-#define JUMP_SPEED 0.12f
-#define GRAVITY 0.004f
-#define CAMERA_FOLLOW 0.60f
+#define JUMP_SPEED 0.095f
+#define GRAVITY 0.0042f
+#define CAMERA_FOLLOW 0.85f
 
 #define DASH_SPEED 0.105f
-#define DASH_UP_SPEED 0.035f
-#define DASH_GRAVITY 0.0035f
-#define DASH_DURATION 16
+#define DASH_UP_SPEED 0.025f
+#define DASH_GRAVITY 0.0042f
+#define DASH_DURATION 30
 #define SLIDE_DURATION 12
 #define SLIDE_FRICTION 0.82f
 
@@ -49,7 +48,6 @@
 #define PLATFORM_MAX_X (2.5f)
 #define PLATFORM_MIN_Z (-9.0f)
 #define PLATFORM_MAX_Z (2.0f)
-
 #define FALL_LIMIT (-3.0f)
 #define CHECKPOINT_RADIUS 0.55f
 #define FINISH_Z (-8.20f)
@@ -78,25 +76,25 @@ typedef struct {
 
 static float camera_yaw = 0.0f;
 static float camera_pitch = 0.0f;
-static float camera_y = 0.0f;
+static float camera_y = 0.45f;
 
 static const Obstacle obstacles[] = {
     {-1.10f, -0.68f, -1.25f,
      0.55f, 0.40f, 0.55f, 0.0f},
 
-    { 0.85f, -0.72f, -2.35f,
+    {0.85f, -0.72f, -2.35f,
      0.75f, 0.32f, 0.50f, 0.35f},
 
-    {-0.65f, -0.70f,  1.15f,
+    {-0.65f, -0.70f, 1.15f,
      0.45f, 0.36f, 0.45f, 0.6f},
 
-    { 1.35f, -0.65f, -4.35f,
+    {1.35f, -0.65f, -4.35f,
      0.65f, 0.46f, 0.65f, 0.0f},
 
     {-0.85f, -0.70f, -5.45f,
      0.70f, 0.36f, 0.55f, 0.2f},
 
-    { 0.45f, -0.62f, -6.65f,
+    {0.45f, -0.62f, -6.65f,
      0.60f, 0.52f, 0.60f, 0.0f},
 
     {-1.45f, -0.72f, -7.45f,
@@ -107,9 +105,9 @@ static const Obstacle obstacles[] = {
     (sizeof(obstacles) / sizeof(obstacles[0]))
 
 static const Checkpoint checkpoints[] = {
-    { 1.55f, -0.25f},
+    {1.55f, -0.25f},
     {-1.55f, -3.30f},
-    { 0.00f, -5.95f}
+    {0.00f, -5.95f}
 };
 
 #define CHECKPOINT_COUNT \
@@ -141,9 +139,10 @@ static Matrix multiply(const Matrix *a, const Matrix *b)
         for (int row = 0; row < 4; row++) {
             float sum = 0.0f;
 
-            for (int k = 0; k < 4; k++)
+            for (int k = 0; k < 4; k++) {
                 sum += a->m[k * 4 + row] *
                        b->m[c * 4 + k];
+            }
 
             r.m[c * 4 + row] = sum;
         }
@@ -180,11 +179,12 @@ static Matrix model_matrix(
         x, y, z, 1
     }};
 
+    /* Câmera mais próxima do personagem. */
     Matrix translation = {{
         1, 0, 0, 0,
         0, 1, 0, 0,
         0, 0, 1, 0,
-        -camera_x, -camera_y, -8.0f - camera_z, 1
+        -camera_x, -camera_y, -5.5f - camera_z, 1
     }};
 
     float cy = cosf(-camera_yaw);
@@ -243,32 +243,32 @@ static bool make_mesh(Game *g)
     uint16_t idx[36];
 
     static const float pos[8][3] = {
-        {-0.5f,-0.5f,-0.5f},
-        { 0.5f,-0.5f,-0.5f},
-        {-0.5f, 0.5f,-0.5f},
-        { 0.5f, 0.5f,-0.5f},
-        {-0.5f,-0.5f, 0.5f},
-        { 0.5f,-0.5f, 0.5f},
-        {-0.5f, 0.5f, 0.5f},
-        { 0.5f, 0.5f, 0.5f}
+        {-0.5f, -0.5f, -0.5f},
+        { 0.5f, -0.5f, -0.5f},
+        {-0.5f,  0.5f, -0.5f},
+        { 0.5f,  0.5f, -0.5f},
+        {-0.5f, -0.5f,  0.5f},
+        { 0.5f, -0.5f,  0.5f},
+        {-0.5f,  0.5f,  0.5f},
+        { 0.5f,  0.5f,  0.5f}
     };
 
     static const uint8_t faces[6][4] = {
-        {1,5,3,7},
-        {4,0,6,2},
-        {2,3,6,7},
-        {0,1,4,5},
-        {5,4,7,6},
-        {0,2,1,3}
+        {1, 5, 3, 7},
+        {4, 0, 6, 2},
+        {2, 3, 6, 7},
+        {0, 1, 4, 5},
+        {5, 4, 7, 6},
+        {0, 2, 1, 3}
     };
 
     static const float colors[6][3] = {
-        {1,0.2f,0.2f},
-        {0.2f,1,0.2f},
-        {0.2f,0.4f,1},
-        {1,1,0.2f},
-        {1,0.3f,1},
-        {0.2f,1,1}
+        {1, 0.2f, 0.2f},
+        {0.2f, 1, 0.2f},
+        {0.2f, 0.4f, 1},
+        {1, 1, 0.2f},
+        {1, 0.3f, 1},
+        {0.2f, 1, 1}
     };
 
     for (int f = 0; f < 6; f++) {
@@ -282,7 +282,6 @@ static bool make_mesh(Game *g)
 
             v[f * 4 + c][6] =
                 (c & 1) ? 1.0f : 0.0f;
-
             v[f * 4 + c][7] =
                 (c & 2) ? 0.0f : 1.0f;
         }
@@ -463,8 +462,7 @@ static bool land_on_obstacle(
         if (!overlaps_obstacle_top(o, x, z))
             continue;
 
-        if (previous_y >= top &&
-            *foot_y <= top) {
+        if (previous_y >= top && *foot_y <= top) {
             *foot_y = top;
             *vy = 0.0f;
             return true;
@@ -504,6 +502,7 @@ static void draw_player(
     bool dashing, bool sliding)
 {
     if (dashing || sliding) {
+        /* Corpo inclinado para a frente durante o dash. */
         draw_player_part(g, x, foot_y, z,
             0, 0.34f, 0,
             0.28f, 0.16f, 0.48f,
@@ -520,7 +519,7 @@ static void draw_player(
             yaw, aspect, camera_x, camera_z);
 
         draw_player_part(g, x, foot_y, z,
-             0.22f, 0.35f, 0.25f,
+            0.22f, 0.35f, 0.25f,
             0.09f, 0.10f, 0.36f,
             yaw, aspect, camera_x, camera_z);
 
@@ -530,7 +529,7 @@ static void draw_player(
             yaw, aspect, camera_x, camera_z);
 
         draw_player_part(g, x, foot_y, z,
-             0.09f, 0.27f, -0.30f,
+            0.09f, 0.27f, -0.30f,
             0.11f, 0.12f, 0.25f,
             yaw, aspect, camera_x, camera_z);
 
@@ -546,7 +545,7 @@ static void draw_player(
         yaw, aspect, camera_x, camera_z);
 
     draw_player_part(g, x, foot_y, z,
-         0.105f, 0.12f, -swing,
+        0.105f, 0.12f, -swing,
         0.12f, 0.24f, 0.14f,
         yaw, aspect, camera_x, camera_z);
 
@@ -561,7 +560,7 @@ static void draw_player(
         yaw, aspect, camera_x, camera_z);
 
     draw_player_part(g, x, foot_y, z,
-         0.225f, 0.39f, swing,
+        0.225f, 0.39f, swing,
         0.10f, 0.30f, 0.12f,
         yaw, aspect, camera_x, camera_z);
 
@@ -654,7 +653,9 @@ int main(void)
         float look_y = axis(in.gamepad.thumb_ry);
 
         camera_yaw -= look_x * CAMERA_TURN_SPEED;
-        camera_pitch += look_y * CAMERA_PITCH_SPEED;
+
+        /* Inverte o controle vertical da câmera. */
+        camera_pitch -= look_y * CAMERA_PITCH_SPEED;
 
         if (camera_pitch < CAMERA_MIN_PITCH)
             camera_pitch = CAMERA_MIN_PITCH;
@@ -662,7 +663,7 @@ int main(void)
         if (camera_pitch > CAMERA_MAX_PITCH)
             camera_pitch = CAMERA_MAX_PITCH;
 
-        /* Movimento relativo à câmera. */
+        /* Movimento relativo à direção da câmera. */
         float stick_x = axis(in.gamepad.thumb_lx);
         float stick_z = -axis(in.gamepad.thumb_ly);
 
@@ -690,7 +691,6 @@ int main(void)
                     z = nz;
 
                 dash_timer--;
-
             } else if (slide_timer > 0) {
                 float nx = x + slide_vx;
                 float nz = z + slide_vz;
@@ -704,19 +704,20 @@ int main(void)
                 slide_vx *= SLIDE_FRICTION;
                 slide_vz *= SLIDE_FRICTION;
                 slide_timer--;
-
             } else {
                 float candidate_x = x + move_x * SPEED;
 
                 if (!collides_obstacles(
-                        candidate_x, foot_y, z))
+                        candidate_x, foot_y, z)) {
                     x = candidate_x;
+                }
 
                 float candidate_z = z + move_z * SPEED;
 
                 if (!collides_obstacles(
-                        x, foot_y, candidate_z))
+                        x, foot_y, candidate_z)) {
                     z = candidate_z;
+                }
             }
         }
 
@@ -796,7 +797,7 @@ int main(void)
         if (grounded && slide_timer == 0)
             has_dashed = false;
 
-        /* Checkpoints. */
+        /* Checkpoints em ordem. */
         if (next_checkpoint < CHECKPOINT_COUNT) {
             const Checkpoint *cp =
                 &checkpoints[next_checkpoint];
@@ -826,6 +827,7 @@ int main(void)
             dash_timer = 0;
             slide_timer = 0;
             has_dashed = false;
+
             dash_vx = dash_vz = 0.0f;
             slide_vx = slide_vz = 0.0f;
         }
@@ -835,8 +837,9 @@ int main(void)
             xsdk_log_write("GG Fall: level completed!");
         }
 
-        /* Câmera acompanha a altura do salto. */
-        camera_y = (foot_y - FLOOR_Y) * CAMERA_FOLLOW;
+        /* Câmera mais alta e acompanhando o pulo. */
+        camera_y =
+            0.45f + (foot_y - FLOOR_Y) * 0.60f;
 
         uint32_t address;
 
@@ -847,6 +850,8 @@ int main(void)
             break;
 
         float aspect = (float)w / (float)h;
+
+        /* Câmera acompanha mais o jogador. */
         float camera_x = x * CAMERA_FOLLOW;
         float camera_z = z * CAMERA_FOLLOW;
 
