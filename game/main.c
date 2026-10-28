@@ -579,28 +579,6 @@ static bool land_on_obstacle(
     return false;
 }
 
-static void draw_player_part(
-    Game *g,
-    float px, float foot_y, float pz,
-    float ox, float oy, float oz,
-    float sx, float sy, float sz,
-    float yaw, float aspect,
-    float camera_x, float camera_z)
-{
-    float c = cosf(yaw);
-    float s = sinf(yaw);
-
-    float wx = px + ox * c + oz * s;
-    float wz = pz - ox * s + oz * c;
-
-    Matrix m = model_matrix(
-        wx, foot_y + oy, wz,
-        sx, sy, sz,
-        yaw, aspect, camera_x, camera_z);
-
-    draw_object(g, &m);
-}
-
 /* Mantida para não alterar as mecânicas já existentes. */
 
 static void draw_checkpoint(
