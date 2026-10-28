@@ -1,10 +1,11 @@
-
 #include <math.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <string.h>
 
 #include "GG-Fall_shaders.h"
+#include "capybara_mesh.h"
+#include "capybara_texture_data.h"
 #include "xsdk/gpu.h"
 #include "xsdk/kernel.h"
 #include "xsdk/log.h"
@@ -17,45 +18,48 @@
 #define SWAP_INTERVAL 1
 #define BEGIN_TIMEOUT_MS 5000
 #define CLEAR_ARGB 0xFF87CEEB
-
 #define VERTEX_FLOATS 8
 #define STRIDE_BYTES (VERTEX_FLOATS * 4)
 #define VERTICES_BYTES (24 * STRIDE_BYTES)
 #define INDICES_BYTES (36 * 2)
 
-#define DEAD_ZONE 8000
+#define CAPYBARA_VERTEX_BYTES \
+    (CAPYBARA_VERTEX_COUNT * STRIDE_BYTES)
+#define CAPYBARA_INDEX_BYTES \
+    (CAPYBARA_INDEX_COUNT * 2)
+
+#define STICK_DEAD_ZONE 8000
 #define SPEED 0.035f
 #define JUMP_SPEED 0.095f
 #define GRAVITY 0.0042f
+#define CAMERA_FOLLOW 1.0f
+
 #define DASH_SPEED 0.105f
 #define DASH_UP_SPEED 0.025f
+#define DASH_GRAVITY 0.0042f
 #define DASH_DURATION 30
+#define SLIDE_DURATION 240
+#define SLIDE_FRICTION 0.94f
+#define SLIDE_STOP_SPEED 0.002f
 
-#define CAMERA_DISTANCE 5.5f
-#define CAMERA_TARGET_HEIGHT 0.45f
 #define CAMERA_TURN_SPEED 0.035f
 #define CAMERA_PITCH_SPEED 0.025f
 #define CAMERA_MIN_PITCH (-0.55f)
-#define CAMERA_MAX_PITCH 0.65f
+#define CAMERA_MAX_PITCH (0.65f)
+#define CAMERA_DISTANCE 5.5f
+#define CAMERA_TARGET_HEIGHT 0.45f
 
 #define FLOOR_Y (-0.88f)
 #define PLAYER_HEIGHT 0.80f
 #define PLAYER_RADIUS 0.18f
+
+#define PLATFORM_MIN_X (-2.5f)
+#define PLATFORM_MAX_X (2.5f)
+#define PLATFORM_MIN_Z (-9.0f)
+#define PLATFORM_MAX_Z (2.0f)
 #define FALL_LIMIT (-3.0f)
-
-#define ARENA_MIN_X (-2.5f)
-#define ARENA_MAX_X 2.5f
-#define ARENA_MIN_Z (-10.0f)
-#define ARENA_MAX_Z 3.0f
-
-#define WALL_COUNT 5
-#define WALL_INTERVAL 210
-#define WALL_SPEED_START 0.018f
-#define WALL_SPEED_MAX 0.040f
-#define WALL_THICKNESS 0.32f
-#define WALL_HEIGHT 1.25f
-#define WALL_GAP_WIDTH 1.55f
-#define SURVIVE_FRAMES 3600
+#define CHECKPOINT_RADIUS 0.55f
+#define FINISH_Z (-8.20f)
 
 typedef struct {
     float m[16];
@@ -66,7 +70,14 @@ typedef struct {
     XsdkTexture texture;
     XsdkSamplerState sampler;
     XsdkDepthStencilState depth;
+
     volatile uint32_t *vertices, *indices;
+
+    volatile uint32_t *capybara_vertices_gpu;
+    volatile uint32_t *capybara_indices_gpu;
+
+    XsdkTexture capybara_texture;
+    XsdkSamplerState capybara_sampler;
 } Game;
 
 typedef struct {
@@ -76,49 +87,91 @@ typedef struct {
 } Obstacle;
 
 typedef struct {
-    float z;
-    int gap;
-    bool active;
-} DashWall;
-
-typedef enum {
-    MENU_HOME,
-    MENU_PLAYING,
-    MENU_LOST,
-    MENU_WON
-} GameState;
+    float x, z;
+} Checkpoint;
 
 static float camera_yaw = 0.0f;
 static float camera_pitch = 0.20f;
 static float camera_y = FLOOR_Y + CAMERA_TARGET_HEIGHT;
 
+static const Obstacle obstacles[] = {
+    {-1.10f, -0.68f, -1.25f,
+     0.55f, 0.40f, 0.55f, 0.0f},
+
+    {0.85f, -0.72f, -2.35f,
+     0.75f, 0.32f, 0.50f, 0.35f},
+
+    {-0.65f, -0.70f, 1.15f,
+     0.45f, 0.36f, 0.45f, 0.6f},
+
+    {1.35f, -0.65f, -4.35f,
+     0.65f, 0.46f, 0.65f, 0.0f},
+
+    {-0.85f, -0.70f, -5.45f,
+     0.70f, 0.36f, 0.55f, 0.2f},
+
+    {0.45f, -0.62f, -6.65f,
+     0.60f, 0.52f, 0.60f, 0.0f},
+
+    {-1.45f, -0.72f, -7.45f,
+     0.50f, 0.32f, 0.50f, 0.0f}
+};
+
+#define OBSTACLE_COUNT \
+    (sizeof(obstacles) / sizeof(obstacles[0]))
+
+static const Checkpoint checkpoints[] = {
+    {1.55f, -0.25f},
+    {-1.55f, -3.30f},
+    {0.00f, -5.95f}
+};
+
+#define CHECKPOINT_COUNT \
+    (sizeof(checkpoints) / sizeof(checkpoints[0]))
+
 static const XsdkVertexElement layout[] = {
-    {.usage = XSDK_USAGE_POSITION,
-     .format = XSDK_VERTEX_FLOAT3, .offset_bytes = 0},
-    {.usage = XSDK_USAGE_COLOR,
-     .format = XSDK_VERTEX_FLOAT3, .offset_bytes = 12},
-    {.usage = XSDK_USAGE_TEXCOORD,
-     .format = XSDK_VERTEX_FLOAT2, .offset_bytes = 24}
+    {
+        .usage = XSDK_USAGE_POSITION,
+        .format = XSDK_VERTEX_FLOAT3,
+        .offset_bytes = 0
+    },
+    {
+        .usage = XSDK_USAGE_COLOR,
+        .format = XSDK_VERTEX_FLOAT3,
+        .offset_bytes = 12
+    },
+    {
+        .usage = XSDK_USAGE_TEXCOORD,
+        .format = XSDK_VERTEX_FLOAT2,
+        .offset_bytes = 24
+    }
 };
 
 static Matrix multiply(const Matrix *a, const Matrix *b)
 {
     Matrix r;
 
-    for (int c = 0; c < 4; c++)
+    for (int c = 0; c < 4; c++) {
         for (int row = 0; row < 4; row++) {
             float sum = 0.0f;
 
-            for (int k = 0; k < 4; k++)
+            for (int k = 0; k < 4; k++) {
                 sum += a->m[k * 4 + row] *
                        b->m[c * 4 + k];
+            }
 
             r.m[c * 4 + row] = sum;
         }
+    }
 
     return r;
 }
 
+/*
+ * Câmera orbital:
+ * acompanha o jogador, gira horizontalmente
+ * e verticalmente e aplica a distância da câmera.
+ */
 static Matrix model_matrix(
     float x, float y, float z,
     float sx, float sy, float sz,
@@ -127,6 +180,7 @@ static Matrix model_matrix(
 {
     float c = cosf(yaw);
     float s = sinf(yaw);
+
     float f = 1.0f / tanf(0.5f);
     float near_z = 0.1f;
     float far_z = 100.0f;
@@ -140,9 +194,9 @@ static Matrix model_matrix(
     }};
 
     Matrix m = {{
-        sx*c, 0, -sx*s, 0,
+        sx * c, 0, -sx * s, 0,
         0, sy, 0, 0,
-        sz*s, 0, sz*c, 0,
+        sz * s, 0, sz * c, 0,
         x, y, z, 1
     }};
 
@@ -156,7 +210,7 @@ static Matrix model_matrix(
     float cy = cosf(-camera_yaw);
     float syaw = sinf(-camera_yaw);
 
-    Matrix ry = {{
+    Matrix rotate_y = {{
         cy, 0, -syaw, 0,
         0, 1, 0, 0,
         syaw, 0, cy, 0,
@@ -166,7 +220,7 @@ static Matrix model_matrix(
     float cp = cosf(-camera_pitch);
     float sp = sinf(-camera_pitch);
 
-    Matrix rx = {{
+    Matrix rotate_x = {{
         1, 0, 0, 0,
         0, cp, -sp, 0,
         0, sp, cp, 0,
@@ -180,8 +234,8 @@ static Matrix model_matrix(
         0, 0, -CAMERA_DISTANCE, 1
     }};
 
-    Matrix view = multiply(&ry, &target);
-    view = multiply(&rx, &view);
+    Matrix view = multiply(&rotate_y, &target);
+    view = multiply(&rotate_x, &view);
     view = multiply(&distance, &view);
 
     Matrix vm = multiply(&view, &m);
@@ -190,8 +244,10 @@ static Matrix model_matrix(
 
 static float axis(int16_t v)
 {
-    return (v > DEAD_ZONE || v < -DEAD_ZONE)
-        ? (float)v / 32768.0f : 0.0f;
+    return (v > STICK_DEAD_ZONE ||
+            v < -STICK_DEAD_ZONE)
+        ? (float)v / 32768.0f
+        : 0.0f;
 }
 
 static void write_gpu(
@@ -201,6 +257,7 @@ static void write_gpu(
 {
     for (uint32_t i = 0; i < bytes / 4; i++) {
         uint32_t word;
+
         memcpy(&word, (const uint8_t *)src + i * 4, 4);
         dst[i] = word;
     }
@@ -214,21 +271,32 @@ static bool make_mesh(Game *g)
     uint16_t idx[36];
 
     static const float pos[8][3] = {
-        {-0.5f,-0.5f,-0.5f}, {0.5f,-0.5f,-0.5f},
-        {-0.5f,0.5f,-0.5f},  {0.5f,0.5f,-0.5f},
-        {-0.5f,-0.5f,0.5f},  {0.5f,-0.5f,0.5f},
-        {-0.5f,0.5f,0.5f},   {0.5f,0.5f,0.5f}
+        {-0.5f, -0.5f, -0.5f},
+        { 0.5f, -0.5f, -0.5f},
+        {-0.5f,  0.5f, -0.5f},
+        { 0.5f,  0.5f, -0.5f},
+        {-0.5f, -0.5f,  0.5f},
+        { 0.5f, -0.5f,  0.5f},
+        {-0.5f,  0.5f,  0.5f},
+        { 0.5f,  0.5f,  0.5f}
     };
 
     static const uint8_t faces[6][4] = {
-        {1,5,3,7}, {4,0,6,2}, {2,3,6,7},
-        {0,1,4,5}, {5,4,7,6}, {0,2,1,3}
+        {1, 5, 3, 7},
+        {4, 0, 6, 2},
+        {2, 3, 6, 7},
+        {0, 1, 4, 5},
+        {5, 4, 7, 6},
+        {0, 2, 1, 3}
     };
 
     static const float colors[6][3] = {
-        {1.0f,0.2f,0.2f}, {0.2f,1.0f,0.2f},
-        {0.2f,0.4f,1.0f}, {1.0f,1.0f,0.2f},
-        {1.0f,0.3f,1.0f}, {0.2f,1.0f,1.0f}
+        {1, 0.2f, 0.2f},
+        {0.2f, 1, 0.2f},
+        {0.2f, 0.4f, 1},
+        {1, 1, 0.2f},
+        {1, 0.3f, 1},
+        {0.2f, 1, 1}
     };
 
     for (int f = 0; f < 6; f++) {
@@ -236,17 +304,23 @@ static bool make_mesh(Game *g)
             int n = faces[f][c];
 
             for (int k = 0; k < 3; k++) {
-                v[f*4+c][k] = pos[n][k];
-                v[f*4+c][3+k] = colors[f][k];
+                v[f * 4 + c][k] = pos[n][k];
+                v[f * 4 + c][3 + k] = colors[f][k];
             }
 
-            v[f*4+c][6] = (c & 1) ? 1.0f : 0.0f;
-            v[f*4+c][7] = (c & 2) ? 0.0f : 1.0f;
+            v[f * 4 + c][6] =
+                (c & 1) ? 1.0f : 0.0f;
+            v[f * 4 + c][7] =
+                (c & 2) ? 0.0f : 1.0f;
         }
 
         uint16_t b = (uint16_t)(f * 4);
-        uint16_t q[6] = {b,b+1,b+2,b+2,b+1,b+3};
-        memcpy(&idx[f*6], q, sizeof q);
+        uint16_t q[6] = {
+            b, b + 1, b + 2,
+            b + 2, b + 1, b + 3
+        };
+
+        memcpy(&idx[f * 6], q, sizeof q);
     }
 
     g->vertices = xsdk_gpu_alloc(VERTICES_BYTES);
@@ -257,24 +331,31 @@ static bool make_mesh(Game *g)
 
     write_gpu(g->vertices, v, VERTICES_BYTES);
     write_gpu(g->indices, idx, INDICES_BYTES);
+
     return true;
 }
 
 static bool init_game(Game *g)
 {
     NTSTATUS s = xsdk_shader_load(
-        &g->vertex, cube_vert.container,
+        &g->vertex,
+        cube_vert.container,
         cube_vert.container_bytes);
 
-    if (NT_SUCCESS(s))
+    if (NT_SUCCESS(s)) {
         s = xsdk_shader_load(
-            &g->pixel, cube_frag.container,
+            &g->pixel,
+            cube_frag.container,
             cube_frag.container_bytes);
+    }
 
-    if (NT_SUCCESS(s))
+    if (NT_SUCCESS(s)) {
         s = xsdk_shader_set_vertex_layout(
-            &g->vertex, layout, 3,
+            &g->vertex,
+            layout,
+            3,
             (const uint32_t[]){STRIDE_BYTES});
+    }
 
     if (!NT_SUCCESS(s))
         return false;
@@ -290,16 +371,39 @@ static bool init_game(Game *g)
     if (!make_mesh(g))
         return false;
 
+    /* Cria os buffers do modelo da capivara. */
+    g->capybara_vertices_gpu =
+        xsdk_gpu_alloc(CAPYBARA_VERTEX_BYTES);
+
+    g->capybara_indices_gpu =
+        xsdk_gpu_alloc(CAPYBARA_INDEX_BYTES);
+
+    if (!g->capybara_vertices_gpu ||
+        !g->capybara_indices_gpu)
+        return false;
+
+    write_gpu(
+        g->capybara_vertices_gpu,
+        capybara_vertices,
+        CAPYBARA_VERTEX_BYTES);
+
+    write_gpu(
+        g->capybara_indices_gpu,
+        capybara_indices,
+        CAPYBARA_INDEX_BYTES);
+
+    /* Textura branca usada no cenário e nos obstáculos. */
     s = xsdk_texture_create(
-        &g->texture, XSDK_FORMAT_A8R8G8B8,
+        &g->texture,
+        XSDK_FORMAT_A8R8G8B8,
         2, 2, 1, true);
 
     if (!NT_SUCCESS(s))
         return false;
 
     static const uint32_t texels[2][2] = {
-        {0xFFFFFFFF,0xFFFFFFFF},
-        {0xFFFFFFFF,0xFFFFFFFF}
+        {0xFFFFFFFF, 0xFFFFFFFF},
+        {0xFFFFFFFF, 0xFFFFFFFF}
     };
 
     xsdk_texture_upload(
@@ -317,238 +421,286 @@ static bool init_game(Game *g)
     };
 
     xsdk_texture_sampler_state(&g->sampler, &sm);
+
+    /* Textura extraída do modelo da capivara. */
+    s = xsdk_texture_create(
+        &g->capybara_texture,
+        XSDK_FORMAT_A8R8G8B8,
+        CAPYBARA_TEXTURE_WIDTH,
+        CAPYBARA_TEXTURE_HEIGHT,
+        1, true);
+
+    if (!NT_SUCCESS(s))
+        return false;
+
+    xsdk_texture_upload(
+        &g->capybara_texture,
+        0,
+        capybara_texels,
+        sizeof capybara_texels[0]);
+
+    xsdk_gpu_invalidate(
+        g->capybara_texture.address,
+        g->capybara_texture.size_bytes);
+
+    xsdk_texture_sampler_state(
+        &g->capybara_sampler, &sm);
+
     return true;
 }
 
 static void draw_object(Game *g, const Matrix *m)
 {
     xsdk_gpu_set_vertex_constants(
-        CUBE_VERT_PUSH, m->m, CUBE_VERT_PUSH_REGISTERS);
+        CUBE_VERT_PUSH,
+        m->m,
+        CUBE_VERT_PUSH_REGISTERS);
 
     xsdk_gpu_draw_indexed(
         XSDK_PRIMITIVE_TRIANGLE_LIST,
-        xsdk_gpu_address(g->indices), 36, false);
+        xsdk_gpu_address(g->indices),
+        36,
+        false);
 }
 
-static void draw_player(
-    Game *g, float x, float y, float z,
-    float yaw, float aspect,
-    float cx, float cz, float phase,
-    bool moving, bool diving)
+/* Desenha o modelo 3D e aplica a textura da capivara. */
+static void draw_capybara(
+    Game *g,
+    float x, float foot_y, float z, float yaw,
+    float aspect, float camera_x, float camera_z)
 {
-    float swing = moving ? sinf(phase) * 0.07f : 0.0f;
+    Matrix m = model_matrix(
+        x, foot_y, z,
+        1.0f, 1.0f, 1.0f,
+        yaw, aspect, camera_x, camera_z);
 
-    float body_y = diving ? 0.32f : 0.39f;
-    float body_h = diving ? 0.16f : 0.34f;
-    float body_z = diving ? 0.0f : 0.0f;
-    float body_sz = diving ? 0.48f : 0.19f;
+    xsdk_gpu_set_texture(
+        CUBE_FRAG_SAMPLER_0_0,
+        &g->capybara_texture,
+        &g->capybara_sampler);
 
-    Matrix body = model_matrix(
-        x, y + body_y, z + body_z,
-        diving ? 0.28f : 0.31f,
-        body_h, body_sz, yaw, aspect, cx, cz);
-    draw_object(g, &body);
+    xsdk_gpu_set_vertices(
+        0,
+        xsdk_gpu_address(g->capybara_vertices_gpu),
+        CAPYBARA_VERTEX_BYTES);
 
-    if (!diving) {
-        Matrix head = model_matrix(
-            x, y + 0.69f, z,
-            0.25f, 0.25f, 0.25f,
-            yaw, aspect, cx, cz);
-        draw_object(g, &head);
-    }
+    xsdk_gpu_set_vertex_constants(
+        CUBE_VERT_PUSH,
+        m.m,
+        CUBE_VERT_PUSH_REGISTERS);
 
-    for (int side = -1; side <= 1; side += 2) {
-        float leg_z = side < 0 ? swing : -swing;
-        float leg_x = side * 0.105f;
-
-        Matrix leg = model_matrix(
-            x + leg_x, y + (diving ? 0.27f : 0.12f),
-            z + (diving ? -0.30f : leg_z),
-            0.12f, diving ? 0.12f : 0.24f,
-            diving ? 0.25f : 0.14f,
-            yaw, aspect, cx, cz);
-        draw_object(g, &leg);
-
-        Matrix arm = model_matrix(
-            x + side * 0.225f,
-            y + (diving ? 0.35f : 0.39f),
-            z + (diving ? 0.25f : -leg_z),
-            0.10f, diving ? 0.10f : 0.30f,
-            diving ? 0.36f : 0.12f,
-            yaw, aspect, cx, cz);
-        draw_object(g, &arm);
-    }
+    xsdk_gpu_draw_indexed(
+        XSDK_PRIMITIVE_TRIANGLE_LIST,
+        xsdk_gpu_address(g->capybara_indices_gpu),
+        CAPYBARA_INDEX_COUNT,
+        false);
 }
 
-static void draw_floor(
-    Game *g, float aspect, float cx, float cz)
+static bool on_platform(float x, float z)
 {
-    Matrix floor = model_matrix(
-        0.0f, FLOOR_Y - 0.06f, -3.5f,
-        5.0f, 0.12f, 13.0f,
-        0.0f, aspect, cx, cz);
-    draw_object(g, &floor);
-
-    /* Bordas laterais da arena. */
-    for (int side = -1; side <= 1; side += 2) {
-        Matrix rail = model_matrix(
-            side * 2.55f, FLOOR_Y + 0.25f, -3.5f,
-            0.12f, 0.50f, 13.0f,
-            0.0f, aspect, cx, cz);
-        draw_object(g, &rail);
-    }
+    return x >= PLATFORM_MIN_X &&
+           x <= PLATFORM_MAX_X &&
+           z >= PLATFORM_MIN_Z &&
+           z <= PLATFORM_MAX_Z;
 }
 
-static DashWall walls[WALL_COUNT];
-static int wall_timer = 0;
-static unsigned wall_index = 0;
-static int survival_time = 0;
-static float wall_speed = WALL_SPEED_START;
-
-static void reset_walls(void)
+static bool collides_obstacles(
+    float x, float foot_y, float z)
 {
-    for (int i = 0; i < WALL_COUNT; i++) {
-        walls[i].z = 30.0f;
-        walls[i].gap = i % 3;
-        walls[i].active = false;
+    for (unsigned i = 0; i < OBSTACLE_COUNT; i++) {
+        const Obstacle *o = &obstacles[i];
+
+        float min_x =
+            o->x - o->sx * 0.5f - PLAYER_RADIUS;
+        float max_x =
+            o->x + o->sx * 0.5f + PLAYER_RADIUS;
+
+        float min_z =
+            o->z - o->sz * 0.5f - PLAYER_RADIUS;
+        float max_z =
+            o->z + o->sz * 0.5f + PLAYER_RADIUS;
+
+        float bottom = o->y - o->sy * 0.5f;
+        float top = o->y + o->sy * 0.5f;
+
+        bool horizontal =
+            x > min_x && x < max_x &&
+            z > min_z && z < max_z;
+
+        bool vertical =
+            foot_y < top - 0.001f &&
+            foot_y + PLAYER_HEIGHT > bottom;
+
+        if (horizontal && vertical)
+            return true;
     }
 
-    wall_timer = 0;
-    wall_index = 0;
-    survival_time = 0;
-    wall_speed = WALL_SPEED_START;
+    return false;
 }
 
-static void spawn_wall(void)
+static bool overlaps_obstacle_top(
+    const Obstacle *o, float x, float z)
 {
-    unsigned i = wall_index++ % WALL_COUNT;
+    float min_x =
+        o->x - o->sx * 0.5f - PLAYER_RADIUS;
+    float max_x =
+        o->x + o->sx * 0.5f + PLAYER_RADIUS;
 
-    walls[i].z = 3.0f;
-    walls[i].gap = (int)((wall_index + survival_time / 300) % 3);
-    walls[i].active = true;
+    float min_z =
+        o->z - o->sz * 0.5f - PLAYER_RADIUS;
+    float max_z =
+        o->z + o->sz * 0.5f + PLAYER_RADIUS;
+
+    return x >= min_x && x <= max_x &&
+           z >= min_z && z <= max_z;
 }
 
-static void update_walls(void)
+static bool land_on_obstacle(
+    float x, float z,
+    float previous_y, float *foot_y, float *vy)
 {
-    wall_timer++;
-    survival_time++;
+    if (*vy > 0.0f)
+        return false;
 
-    if (wall_timer >= WALL_INTERVAL) {
-        wall_timer = 0;
-        spawn_wall();
-    }
+    for (unsigned i = 0; i < OBSTACLE_COUNT; i++) {
+        const Obstacle *o = &obstacles[i];
+        float top = o->y + o->sy * 0.5f;
 
-    /* A velocidade aumenta gradualmente. */
-    wall_speed = WALL_SPEED_START +
-        (float)survival_time * 0.000004f;
-
-    if (wall_speed > WALL_SPEED_MAX)
-        wall_speed = WALL_SPEED_MAX;
-
-    for (int i = 0; i < WALL_COUNT; i++) {
-        if (!walls[i].active)
+        if (!overlaps_obstacle_top(o, x, z))
             continue;
 
-        walls[i].z -= wall_speed;
-
-        if (walls[i].z < ARENA_MIN_Z - 1.0f)
-            walls[i].active = false;
-    }
-}
-
-static void draw_walls(
-    Game *g, float aspect, float cx, float cz)
-{
-    for (int i = 0; i < WALL_COUNT; i++) {
-        if (!walls[i].active)
-            continue;
-
-        for (int lane = 0; lane < 3; lane++) {
-            if (lane == walls[i].gap)
-                continue;
-
-            float segment_x = -1.65f + lane * 1.65f;
-
-            Matrix segment = model_matrix(
-                segment_x,
-                FLOOR_Y + WALL_HEIGHT * 0.5f,
-                walls[i].z,
-                1.65f, WALL_HEIGHT, WALL_THICKNESS,
-                0.0f, aspect, cx, cz);
-
-            draw_object(g, &segment);
-        }
-    }
-}
-
-static bool hit_wall(float x, float y, float z)
-{
-    for (int i = 0; i < WALL_COUNT; i++) {
-        if (!walls[i].active)
-            continue;
-
-        if (fabsf(z - walls[i].z) >
-            WALL_THICKNESS * 0.5f + PLAYER_RADIUS)
-            continue;
-
-        if (y >= FLOOR_Y + WALL_HEIGHT)
-            continue;
-
-        for (int lane = 0; lane < 3; lane++) {
-            if (lane == walls[i].gap)
-                continue;
-
-            float center_x = -1.65f + lane * 1.65f;
-
-            if (fabsf(x - center_x) <
-                0.825f + PLAYER_RADIUS)
-                return true;
+        if (previous_y >= top && *foot_y <= top) {
+            *foot_y = top;
+            *vy = 0.0f;
+            return true;
         }
     }
 
     return false;
 }
 
-static void draw_menu_scene(
-    Game *g, float aspect)
+static void draw_player_part(
+    Game *g,
+    float px, float foot_y, float pz,
+    float ox, float oy, float oz,
+    float sx, float sy, float sz,
+    float yaw, float aspect,
+    float camera_x, float camera_z)
 {
-    Matrix floor = model_matrix(
-        0.0f, -0.94f, 0.0f,
-        4.5f, 0.12f, 4.5f,
-        0.0f, aspect, 0.0f, 0.0f);
-    draw_object(g, &floor);
+    float c = cosf(yaw);
+    float s = sinf(yaw);
 
-    /* Blocos decorativos do menu. */
-    Matrix left = model_matrix(
-        -1.15f, -0.25f, 0.0f,
-        0.55f, 0.55f, 0.55f,
-        0.2f, aspect, 0.0f, 0.0f);
-    draw_object(g, &left);
+    float wx = px + ox * c + oz * s;
+    float wz = pz - ox * s + oz * c;
 
-    Matrix center = model_matrix(
-        0.0f, 0.0f, 0.0f,
-        0.75f, 0.75f, 0.75f,
-        0.0f, aspect, 0.0f, 0.0f);
-    draw_object(g, &center);
+    Matrix m = model_matrix(
+        wx, foot_y + oy, wz,
+        sx, sy, sz,
+        yaw, aspect, camera_x, camera_z);
 
-    Matrix right = model_matrix(
-        1.15f, -0.25f, 0.0f,
-        0.55f, 0.55f, 0.55f,
-        -0.2f, aspect, 0.0f, 0.0f);
-    draw_object(g, &right);
+    draw_object(g, &m);
+}
+
+/* Mantida para não alterar as mecânicas já existentes. */
+static void draw_player(
+    Game *g,
+    float x, float foot_y, float z, float yaw,
+    float aspect, float camera_x, float camera_z,
+    float walk_phase, bool moving,
+    bool dashing, bool sliding)
+{
+    if (dashing || sliding) {
+        draw_player_part(g, x, foot_y, z,
+            0, 0.34f, 0,
+            0.28f, 0.16f, 0.48f,
+            yaw, aspect, camera_x, camera_z);
+
+        draw_player_part(g, x, foot_y, z,
+            0, 0.43f, 0.28f,
+            0.23f, 0.20f, 0.22f,
+            yaw, aspect, camera_x, camera_z);
+
+        draw_player_part(g, x, foot_y, z,
+            -0.22f, 0.35f, 0.25f,
+            0.09f, 0.10f, 0.36f,
+            yaw, aspect, camera_x, camera_z);
+
+        draw_player_part(g, x, foot_y, z,
+            0.22f, 0.35f, 0.25f,
+            0.09f, 0.10f, 0.36f,
+            yaw, aspect, camera_x, camera_z);
+
+        draw_player_part(g, x, foot_y, z,
+            -0.09f, 0.27f, -0.30f,
+            0.11f, 0.12f, 0.25f,
+            yaw, aspect, camera_x, camera_z);
+
+        draw_player_part(g, x, foot_y, z,
+            0.09f, 0.27f, -0.30f,
+            0.11f, 0.12f, 0.25f,
+            yaw, aspect, camera_x, camera_z);
+
+        return;
+    }
+
+    float swing =
+        moving ? sinf(walk_phase) * 0.07f : 0.0f;
+
+    draw_player_part(g, x, foot_y, z,
+        -0.105f, 0.12f, swing,
+        0.12f, 0.24f, 0.14f,
+        yaw, aspect, camera_x, camera_z);
+
+    draw_player_part(g, x, foot_y, z,
+        0.105f, 0.12f, -swing,
+        0.12f, 0.24f, 0.14f,
+        yaw, aspect, camera_x, camera_z);
+
+    draw_player_part(g, x, foot_y, z,
+        0, 0.39f, 0,
+        0.31f, 0.34f, 0.19f,
+        yaw, aspect, camera_x, camera_z);
+
+    draw_player_part(g, x, foot_y, z,
+        -0.225f, 0.39f, -swing,
+        0.10f, 0.30f, 0.12f,
+        yaw, aspect, camera_x, camera_z);
+
+    draw_player_part(g, x, foot_y, z,
+        0.225f, 0.39f, swing,
+        0.10f, 0.30f, 0.12f,
+        yaw, aspect, camera_x, camera_z);
+
+    draw_player_part(g, x, foot_y, z,
+        0, 0.69f, 0,
+        0.25f, 0.25f, 0.25f,
+        yaw, aspect, camera_x, camera_z);
+}
+
+static void draw_checkpoint(
+    Game *g, float x, float z,
+    float aspect, float camera_x, float camera_z)
+{
+    Matrix marker = model_matrix(
+        x, FLOOR_Y + 0.025f, z,
+        0.55f, 0.05f, 0.55f,
+        0.0f, aspect, camera_x, camera_z);
+
+    draw_object(g, &marker);
 }
 
 int main(void)
 {
-    xsdk_log_write("GG Fall: Block Dash");
+    xsdk_log_write("GG Fall: capybara model, camera and dash");
 
-    xsdk_splash_show(1500);
+    NTSTATUS s = xsdk_splash_show(1500);
+    (void)s;
 
-    NTSTATUS s = xsdk_gpu_open();
+    s = xsdk_gpu_open();
     if (!NT_SUCCESS(s))
         return 1;
 
-    static Game g;
+    static Game g = {0};
 
     if (!init_game(&g))
         return 1;
@@ -564,8 +716,6 @@ int main(void)
     if (!NT_SUCCESS(s))
         return 1;
 
-    GameState state = MENU_HOME;
-
     float x = 0.0f;
     float foot_y = FLOOR_Y;
     float z = 0.0f;
@@ -575,19 +725,28 @@ int main(void)
 
     float dash_vx = 0.0f;
     float dash_vz = 0.0f;
+    float slide_vx = 0.0f;
+    float slide_vz = 0.0f;
+
     int dash_timer = 0;
+    int slide_timer = 0;
 
     bool grounded = true;
     bool has_dashed = false;
+    bool finished = false;
     bool previous_a = false;
+
+    float checkpoint_x = 0.0f;
+    float checkpoint_z = 0.0f;
+    unsigned next_checkpoint = 0;
 
     for (;;) {
         INPUT_STATE in = {0};
 
-        XamInputGetState(0, 0, &in);
-
-        if (in.gamepad.buttons & INPUT_GAMEPAD_BACK)
+        if (XamInputGetState(0, 0, &in) == ERROR_SUCCESS &&
+            (in.gamepad.buttons & INPUT_GAMEPAD_BACK)) {
             break;
+        }
 
         bool a_down =
             (in.gamepad.buttons & INPUT_GAMEPAD_A) != 0;
@@ -595,11 +754,9 @@ int main(void)
         bool a_pressed = a_down && !previous_a;
         previous_a = a_down;
 
+        /* Analógico direito controla a câmera orbital. */
         float look_x = axis(in.gamepad.thumb_rx);
         float look_y = axis(in.gamepad.thumb_ry);
-
-        float stick_x = axis(in.gamepad.thumb_lx);
-        float stick_z = -axis(in.gamepad.thumb_ly);
 
         camera_yaw -= look_x * CAMERA_TURN_SPEED;
         camera_pitch -= look_y * CAMERA_PITCH_SPEED;
@@ -609,6 +766,10 @@ int main(void)
 
         if (camera_pitch > CAMERA_MAX_PITCH)
             camera_pitch = CAMERA_MAX_PITCH;
+
+        /* Movimento relativo à direção da câmera. */
+        float stick_x = axis(in.gamepad.thumb_lx);
+        float stick_z = -axis(in.gamepad.thumb_ly);
 
         float cy = cosf(camera_yaw);
         float sy = sinf(camera_yaw);
@@ -622,133 +783,171 @@ int main(void)
         if (moving)
             walk_phase += 0.22f;
 
-        /*
-         * MENU:
-         * Aperte A para começar.
-         */
-        if (state == MENU_HOME) {
-            if (a_pressed) {
-                x = 0.0f;
-                foot_y = FLOOR_Y;
-                z = 0.0f;
-                vy = 0.0f;
-                yaw = 0.0f;
-
-                dash_timer = 0;
-                has_dashed = false;
-                grounded = true;
-
-                camera_yaw = 0.0f;
-                camera_pitch = 0.20f;
-
-                reset_walls();
-                state = MENU_PLAYING;
-
-                xsdk_log_write("GG Fall: start Block Dash");
-            }
-        }
-
-        /*
-         * DERROTA OU VITÓRIA:
-         * Aperte A para voltar ao menu.
-         */
-        else if (state == MENU_LOST ||
-                 state == MENU_WON) {
-            if (a_pressed) {
-                state = MENU_HOME;
-                xsdk_log_write("GG Fall: back to menu");
-            }
-        }
-
-        /*
-         * JOGO:
-         * movimento, pulo, dash e paredes.
-         */
-        else if (state == MENU_PLAYING) {
+        if (!finished) {
             if (dash_timer > 0) {
                 float nx = x + dash_vx;
                 float nz = z + dash_vz;
 
-                if (nx >= ARENA_MIN_X &&
-                    nx <= ARENA_MAX_X)
+                if (!collides_obstacles(nx, foot_y, z))
                     x = nx;
 
-                if (nz >= ARENA_MIN_Z &&
-                    nz <= ARENA_MAX_Z)
+                if (!collides_obstacles(x, foot_y, nz))
                     z = nz;
 
                 dash_timer--;
-            } else {
-                float nx = x + move_x * SPEED;
-                float nz = z + move_z * SPEED;
+            } else if (slide_timer > 0) {
+                float nx = x + slide_vx;
+                float nz = z + slide_vz;
 
-                if (nx >= ARENA_MIN_X &&
-                    nx <= ARENA_MAX_X)
+                if (!collides_obstacles(nx, foot_y, z))
                     x = nx;
 
-                if (nz >= ARENA_MIN_Z &&
-                    nz <= ARENA_MAX_Z)
+                if (!collides_obstacles(x, foot_y, nz))
                     z = nz;
+
+                slide_vx *= SLIDE_FRICTION;
+                slide_vz *= SLIDE_FRICTION;
+                slide_timer--;
+
+                float slide_speed = sqrtf(
+                    slide_vx * slide_vx +
+                    slide_vz * slide_vz);
+
+                if (slide_speed < SLIDE_STOP_SPEED) {
+                    slide_timer = 0;
+                    slide_vx = 0.0f;
+                    slide_vz = 0.0f;
+                }
+            } else {
+                float candidate_x = x + move_x * SPEED;
+
+                if (!collides_obstacles(
+                        candidate_x, foot_y, z)) {
+                    x = candidate_x;
+                }
+
+                float candidate_z = z + move_z * SPEED;
+
+                if (!collides_obstacles(
+                        x, foot_y, candidate_z)) {
+                    z = candidate_z;
+                }
             }
+        }
 
-            if (moving && dash_timer == 0)
-                yaw = atan2f(move_x, move_z);
+        if (moving && dash_timer == 0 && slide_timer == 0)
+            yaw = atan2f(move_x, move_z);
 
-            if (a_pressed && grounded) {
-                vy = JUMP_SPEED;
-                grounded = false;
-                has_dashed = false;
-            } else if (a_pressed && !grounded &&
-                       !has_dashed) {
-                has_dashed = true;
-                dash_timer = DASH_DURATION;
+        /* Pulo e dash no ar. */
+        if (a_pressed && grounded && !finished) {
+            vy = JUMP_SPEED;
+            grounded = false;
+            has_dashed = false;
+        } else if (a_pressed && !grounded &&
+                   !has_dashed && !finished) {
+            has_dashed = true;
+            dash_timer = DASH_DURATION;
 
+            float forward_x = sinf(yaw);
+            float forward_z = cosf(yaw);
+
+            if (moving) {
                 float len = sqrtf(
                     move_x * move_x +
                     move_z * move_z);
 
                 if (len > 0.001f) {
-                    dash_vx = move_x / len * DASH_SPEED;
-                    dash_vz = move_z / len * DASH_SPEED;
-                } else {
-                    dash_vx = sinf(yaw) * DASH_SPEED;
-                    dash_vz = cosf(yaw) * DASH_SPEED;
+                    forward_x = move_x / len;
+                    forward_z = move_z / len;
                 }
-
-                vy = DASH_UP_SPEED;
+            } else {
+                forward_x = sinf(camera_yaw);
+                forward_z = -cosf(camera_yaw);
             }
 
-            float previous_y = foot_y;
-            foot_y += vy;
+            dash_vx = forward_x * DASH_SPEED;
+            dash_vz = forward_z * DASH_SPEED;
+            vy = DASH_UP_SPEED;
+        }
 
-            if (!grounded)
+        float previous_y = foot_y;
+        foot_y += vy;
+
+        if (!grounded) {
+            if (dash_timer > 0)
+                vy -= DASH_GRAVITY;
+            else
                 vy -= GRAVITY;
+        }
 
-            if (vy <= 0.0f &&
-                previous_y >= FLOOR_Y &&
-                foot_y <= FLOOR_Y) {
-                foot_y = FLOOR_Y;
-                vy = 0.0f;
-                grounded = true;
-                has_dashed = false;
+        bool landed = false;
+
+        if (vy <= 0.0f &&
+            on_platform(x, z) &&
+            previous_y >= FLOOR_Y &&
+            foot_y <= FLOOR_Y) {
+            foot_y = FLOOR_Y;
+            vy = 0.0f;
+            grounded = true;
+            landed = true;
+        }
+
+        if (!landed &&
+            land_on_obstacle(
+                x, z, previous_y, &foot_y, &vy)) {
+            grounded = true;
+            landed = true;
+        }
+
+        /* Ao pousar durante o dash, começa a deslizar. */
+        if (landed && dash_timer > 0) {
+            slide_timer = SLIDE_DURATION;
+            slide_vx = dash_vx;
+            slide_vz = dash_vz;
+            dash_timer = 0;
+        }
+
+        if (grounded && slide_timer == 0)
+            has_dashed = false;
+
+        /* Checkpoints em sequência. */
+        if (next_checkpoint < CHECKPOINT_COUNT) {
+            const Checkpoint *cp =
+                &checkpoints[next_checkpoint];
+
+            float dx = x - cp->x;
+            float dz = z - cp->z;
+
+            if (dx * dx + dz * dz <=
+                CHECKPOINT_RADIUS * CHECKPOINT_RADIUS) {
+                checkpoint_x = cp->x;
+                checkpoint_z = cp->z;
+                next_checkpoint++;
+
+                xsdk_log_write(
+                    "GG Fall: checkpoint activated");
             }
+        }
 
-            if (foot_y < FALL_LIMIT) {
-                state = MENU_LOST;
-                xsdk_log_write("GG Fall: fell off the arena");
-            }
+        /* Respawn se cair da plataforma. */
+        if (foot_y < FALL_LIMIT) {
+            x = checkpoint_x;
+            z = checkpoint_z;
+            foot_y = FLOOR_Y;
+            vy = 0.0f;
+            grounded = true;
 
-            update_walls();
+            dash_timer = 0;
+            slide_timer = 0;
+            has_dashed = false;
 
-            if (hit_wall(x, foot_y, z)) {
-                state = MENU_LOST;
-                xsdk_log_write("GG Fall: hit a wall");
-            }
+            dash_vx = dash_vz = 0.0f;
+            slide_vx = slide_vz = 0.0f;
+        }
 
-            if (survival_time >= SURVIVE_FRAMES) {
-                state = MENU_WON;
-                xsdk_log_write("GG Fall: Block Dash completed");
-            }
+        if (!finished && z <= FINISH_Z) {
+            finished = true;
+            xsdk_log_write("GG Fall: level completed!");
         }
 
         camera_y = foot_y + CAMERA_TARGET_HEIGHT;
@@ -763,8 +962,8 @@ int main(void)
 
         float aspect = (float)w / (float)h;
 
-        float camera_x = x;
-        float camera_z = z;
+        float camera_x = x * CAMERA_FOLLOW;
+        float camera_z = z * CAMERA_FOLLOW;
 
         xsdk_gpu_set_target(w, h);
         xsdk_gpu_set_depth_stencil(&g.depth);
@@ -773,6 +972,7 @@ int main(void)
         xsdk_built_shader_set_literals(&cube_vert);
         xsdk_built_shader_set_literals(&cube_frag);
 
+        /* Textura e mesh dos objetos do cenário. */
         xsdk_gpu_set_texture(
             CUBE_FRAG_SAMPLER_0_0,
             &g.texture, &g.sampler);
@@ -782,22 +982,41 @@ int main(void)
             xsdk_gpu_address(g.vertices),
             VERTICES_BYTES);
 
-        if (state == MENU_HOME) {
-            camera_y = 0.0f;
-            draw_menu_scene(&g, aspect);
-        } else {
-            draw_floor(&g, aspect, camera_x, camera_z);
+        Matrix platform = model_matrix(
+            0.0f, -0.94f, -3.5f,
+            5.0f, 0.12f, 11.0f,
+            0.0f, aspect, camera_x, camera_z);
 
-            if (state == MENU_PLAYING)
-                draw_walls(
-                    &g, aspect, camera_x, camera_z);
+        draw_object(&g, &platform);
 
-            draw_player(
-                &g, x, foot_y, z, yaw,
-                aspect, camera_x, camera_z,
-                walk_phase, moving,
-                dash_timer > 0);
+        for (unsigned i = 0; i < CHECKPOINT_COUNT; i++) {
+            draw_checkpoint(
+                &g, checkpoints[i].x, checkpoints[i].z,
+                aspect, camera_x, camera_z);
         }
+
+        for (unsigned i = 0; i < OBSTACLE_COUNT; i++) {
+            const Obstacle *o = &obstacles[i];
+
+            Matrix m = model_matrix(
+                o->x, o->y, o->z,
+                o->sx, o->sy, o->sz,
+                o->yaw, aspect, camera_x, camera_z);
+
+            draw_object(&g, &m);
+        }
+
+        Matrix finish_line = model_matrix(
+            0.0f, FLOOR_Y + 0.025f, FINISH_Z,
+            4.5f, 0.05f, 0.18f,
+            0.0f, aspect, camera_x, camera_z);
+
+        draw_object(&g, &finish_line);
+
+        /* Agora desenha a capivara no lugar do boneco de cubos. */
+        draw_capybara(
+            &g, x, foot_y, z, yaw,
+            aspect, camera_x, camera_z);
 
         xsdk_gpu_resolve(
             address, w, h, CLEAR_ARGB);
@@ -806,11 +1025,19 @@ int main(void)
     }
 
     xsdk_present_close();
+
+    xsdk_texture_free(&g.capybara_texture);
     xsdk_texture_free(&g.texture);
+
+    xsdk_gpu_free(g.capybara_indices_gpu);
+    xsdk_gpu_free(g.capybara_vertices_gpu);
+
     xsdk_gpu_free(g.indices);
     xsdk_gpu_free(g.vertices);
+
     xsdk_shader_free(&g.pixel);
     xsdk_shader_free(&g.vertex);
+
     xsdk_gpu_close();
 
     return 0;
